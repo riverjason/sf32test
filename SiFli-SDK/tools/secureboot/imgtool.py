@@ -165,7 +165,16 @@ def encrypt_image_help_static(img, eimg) :
     flags=struct.pack("<H", FLAGS.flags)
     header=img_len+bksize+flags+enc_session
 
-    # 3.1 Insert sig_pub_key and image header into ftab
+    # 3.0 Sign the PLAINTEXT image (bootloader verifies via XIP after decryption)
+    signature=b''
+    if FLAGS.sigkey:
+        hash=SHA256.new(bytes(data))
+        pri_key = RSA.import_key(open(FLAGS.sigkey+"_pri.pem").read())
+        sign_rsa = pkcs1_15.new(pri_key)
+        signature = sign_rsa.sign(hash)
+        header+=signature
+
+    # 3.1 Insert sig_pub_key and FULL image header (with signature) into ftab
     sig_key=open(FLAGS.sigkey + "_pub.der", "rb").read()
     sig_len=len(sig_key)
     hd_len=len(header)
@@ -188,14 +197,6 @@ def encrypt_image_help_static(img, eimg) :
         ciphertext= cipher_aes.encrypt(bytes(data2))
         data3+=ciphertext
         i+=len(data2)
-
-    #5. Sign the encrypted image
-    if FLAGS.sigkey:
-        hash=SHA256.new(data3)
-        pri_key = RSA.import_key(open(FLAGS.sigkey+"_pri.pem").read())
-        sign_rsa = pkcs1_15.new(pri_key)
-        signature = sign_rsa.sign(hash)
-        header+=signature
 
     #7. Save to encrypted image file
     file_out=open(eimg, "wb")

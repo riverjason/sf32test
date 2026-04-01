@@ -1,10 +1,10 @@
 @echo off
 setlocal
 
-set SEC_TOOL_DIR=D:\dev\sf32\sf32test\SiFli-SDK\tools\secureboot
-set KEY_DIR=D:\dev\sf32\sf32test\ex1\secboot\keys
-set COM_PORT=COM6
-set PYTHON_VENV=C:\Users\EDY\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts
+set SEC_TOOL_DIR=e:\study\sf32\SiFli-SDK\tools\secureboot
+set KEY_DIR=e:\study\sf32\ex1\secboot\keys
+set COM_PORT=COM8
+set PYTHON_VENV=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts
 set PATH=%PYTHON_VENV%;%PATH%
 
 echo ========================================================

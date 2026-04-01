@@ -1,12 +1,12 @@
 @echo off
 setlocal
 
-set ROOT_DIR=D:\dev\sf32\sf32test\ex1
+set ROOT_DIR=e:\study\sf32\ex1
 set BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu
-set SEC_TOOL_DIR=D:\dev\sf32\sf32test\SiFli-SDK\tools\secureboot
+set SEC_TOOL_DIR=e:\study\sf32\SiFli-SDK\tools\secureboot
 set KEY_DIR=%ROOT_DIR%\secboot\keys
 set OUT_DIR=%ROOT_DIR%\secboot\out
-set PY_EXE=C:\Users\EDY\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
+set PY_EXE=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
 
 echo ============================================
 echo   Generate Secure Image + Secure FTAB
@@ -58,9 +58,16 @@ if errorlevel 1 (
 copy /y "enc_ftab.bin" "ftab_sec.bin" >nul
 popd
 
+echo [2/2] Strip 296-byte header from image_sec.bin (header is in ftab) ...
+"%PY_EXE%" -c "d=open(r'%OUT_DIR%\image_sec.bin','rb').read(); open(r'%OUT_DIR%\image_sec.bin','wb').write(d[296:])"
+if errorlevel 1 (
+    echo [FAIL] header strip failed.
+    exit /b 1
+)
+
 echo.
 echo [OK] Generated:
-echo   %OUT_DIR%\image_sec.bin
-echo   %OUT_DIR%\ftab_sec.bin
+echo   %OUT_DIR%\image_sec.bin (encrypted data only, no header)
+echo   %OUT_DIR%\ftab_sec.bin  (contains keys + image header + signature)
 echo.
 endlocal

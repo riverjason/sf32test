@@ -143,7 +143,7 @@ static int hash_calculate(uint8_t *in, uint32_t in_size, uint8_t *out, uint8_t a
 
 #ifdef HAL_HASH_MODULE_ENABLED
     HAL_HASH_reset();
-    HAL_HASH_init(NULL, algo, 0);
+    HAL_HASH_init(NULL, HASH_ALGO_SHA256, 0);
 #else
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
@@ -558,7 +558,7 @@ int32_t boot_sha256_calculate(uint8_t *in, uint32_t in_size, uint8_t *uid, uint3
 
 #ifdef HAL_HASH_MODULE_ENABLED
     HAL_HASH_reset();
-    HAL_HASH_init(NULL, algo, 0);
+    HAL_HASH_init(NULL, HASH_ALGO_SHA256, 0);
 #else
     mbedtls_sha256_init(&ctx);
     mbedtls_sha256_starts(&ctx, 0);
@@ -586,7 +586,7 @@ int32_t boot_sha256_calculate(uint8_t *in, uint32_t in_size, uint8_t *uid, uint3
         if (i > 0)
         {
             HAL_HASH_reset();
-            HAL_HASH_init((uint32_t *)out, algo, last ? i : 0);
+            HAL_HASH_init((uint32_t *)out, HASH_ALGO_SHA256, last ? i : 0);
         }
 #endif /* HAL_HASH_MODULE_ENABLED */
 

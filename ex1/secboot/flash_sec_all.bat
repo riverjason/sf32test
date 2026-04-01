@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set ROOT_DIR=D:\dev\sf32\sf32test\ex1
+set ROOT_DIR=e:\study\sf32\ex1
 set BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu
 set SEC_OUT_DIR=%ROOT_DIR%\secboot\out
-set SFTOOL=C:\Users\EDY\.sifli\tools\sftool\0.1.16\sftool.exe
-set COM_PORT=COM6
+set SFTOOL=C:\Users\jason\.sifli\tools\sftool\0.1.16\sftool.exe
+set COM_PORT=COM8
 
 echo ============================================
 echo   Flash Secure Boot Images (SF32LB52)
