@@ -1,0 +1,24 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+list = os.listdir(cwd)
+
+# Add SDK
+Import('SIFLI_SDK')
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir="sifli_sdk", duplicate=0))
+
+# Rev<A4：强符号 lcpu_img_install + g_lcpu_bin（仅 sf32lb52_lcpu.h）；勿链整段 lcpu_install.c（与 lcpu_patch.c 重复）。
+_ble_patch = os.path.join(SIFLI_SDK, 'middleware', 'bluetooth', 'patch', 'sf32lb52')
+objs += DefineGroup(
+    'ble_lcpu_img',
+    [os.path.join(cwd, 'ble_lcpu_img_install.c')],
+    depend=['BLUETOOTH'],
+    CPPPATH=[_ble_patch],
+)
+
+# Add application source code
+objs.extend(SConscript(cwd+'/../src/SConscript', variant_dir="src", duplicate=0))
+
+Return('objs')
