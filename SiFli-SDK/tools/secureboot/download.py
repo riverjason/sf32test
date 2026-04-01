@@ -71,7 +71,7 @@ class SerialThread:
     def get_data(self):
         global failed
         exp_len = 512
-        data=""
+        data=b""
         sem.acquire()
         while self.running and self.ser.is_open:
             data += self.ser.read(exp_len)
@@ -79,22 +79,22 @@ class SerialThread:
             #if len(data)>0:
             #    print(data)
             
-            if (data.find("Fail")>=0):
+            if (data.find(b"Fail")>=0):
                 if (FLAGS.verbose==2):
-                    print("Received:"+data)
+                    print("Received:"+data.decode(errors="replace"))
                 failed=1;
-                data = ""
+                data = b""
                 sem.release()
-            if (data.find("OK")>=0):
+            if (data.find(b"OK")>=0):
                 if (FLAGS.verbose==2):
-                    print("Received:"+data)
-                data = ""    
+                    print("Received:"+data.decode(errors="replace"))
+                data = b""    
                 sem.release()
             
             #data=""    
             
     def send_data(self, data):
-        self.ser.write("dfu_recv "+str(len(data))+"\r")
+        self.ser.write(("dfu_recv "+str(len(data))+"\r").encode("ascii"))
         self.ser.write(data)
 
     def stop(self):
@@ -256,7 +256,7 @@ def enable_secure():
 
 def reset_ftab():
     serial=SerialThread(FLAGS.port)
-    serial.ser.write("reset"+"\r")
+    serial.ser.write(b"reset\r")
     serial.stop()
     
 def download_flashwrite():

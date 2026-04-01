@@ -3,6 +3,16 @@
 #include <stdlib.h>
 #include "bf0_hal.h"
 
+#ifdef SF32LB52X
+extern volatile uint32_t hal_efuse_dbg_sr_before;
+extern volatile uint32_t hal_efuse_dbg_anacr;
+extern volatile uint32_t hal_efuse_dbg_anau;
+extern volatile uint32_t hal_efuse_dbg_timr;
+extern volatile uint32_t hal_efuse_dbg_cr_before;
+extern volatile uint32_t hal_efuse_dbg_ready;
+extern volatile uint32_t hal_efuse_dbg_timeout;
+#endif
+
 #define EFUSE_BANK_NUM       HAL_EFUSE_BANK_NUM   /* 4 */
 #define EFUSE_BANK_BYTES     HAL_EFUSE_BANK_SIZE  /* 32 */
 #define EFUSE_TOTAL_BYTES    (EFUSE_BANK_NUM * EFUSE_BANK_BYTES)  /* 128 */
@@ -24,6 +34,28 @@
 static int efuse_offset_in_bank3(int bit_offset)
 {
     return (bit_offset >= EFUSE_BANK3_BIT_MIN && bit_offset <= EFUSE_BANK3_BIT_MAX);
+}
+
+static void efuse_pwr_route_enable(uint32_t *saved_pa30)
+{
+#ifdef SF32LB52X
+    *saved_pa30 = hwp_pinmux1->PAD_PA30;
+    hwp_pinmux1->PAD_PA30 =
+        (*saved_pa30 & ~HPSYS_PINMUX_PAD_PA30_FSEL_Msk) |
+        (2u << HPSYS_PINMUX_PAD_PA30_FSEL_Pos); /* FSEL=2 => EFUSE_PWR */
+    HAL_Delay_us(10);
+#else
+    *saved_pa30 = 0;
+#endif
+}
+
+static void efuse_pwr_route_restore(uint32_t saved_pa30)
+{
+#ifdef SF32LB52X
+    hwp_pinmux1->PAD_PA30 = saved_pa30;
+#else
+    (void)saved_pa30;
+#endif
 }
 
 static void hex_dump_line(const uint8_t *buf, int len, int base_byte_off)
@@ -89,36 +121,35 @@ static void cmd_efuse_info(void)
     int i;
 
     rt_kprintf("=== eFuse Known Fields ===\n");
+    rt_kprintf("  (bank = bit_offset / 256;  each bank = 256 bits = 32 bytes)\n");
 
-    /* UID: bank 0, byte 0-15 */
+    /* UID / SIG_HASH / SECURE_FLAG: all in bank 0 */
     if (efuse_read_bank(0, buf) == 0)
     {
-        rt_kprintf("UID         (bit %3d, %2d bytes): ", FIELD_UID_BIT, FIELD_UID_SIZE);
+        rt_kprintf("UID         (bank 0, bit %3d, %2d bytes): ", FIELD_UID_BIT, FIELD_UID_SIZE);
         for (i = 0; i < FIELD_UID_SIZE; i++)
             rt_kprintf("%02X", buf[i]);
         rt_kprintf("\n");
 
-        /* SIG_HASH: bank 0, byte 16-23 */
-        rt_kprintf("SIG_HASH    (bit %3d, %2d bytes): ", FIELD_SIGHASH_BIT, FIELD_SIGHASH_SIZE);
+        rt_kprintf("SIG_HASH    (bank 0, bit %3d,  %d bytes): ", FIELD_SIGHASH_BIT, FIELD_SIGHASH_SIZE);
         for (i = 16; i < 16 + FIELD_SIGHASH_SIZE; i++)
             rt_kprintf("%02X", buf[i]);
         rt_kprintf("\n");
 
-        /* SECURE: bank 0, byte 24-27 */
-        rt_kprintf("SECURE_FLAG (bit %3d, %2d bytes): ", FIELD_SECURE_BIT, FIELD_SECURE_SIZE);
+        rt_kprintf("SECURE_FLAG (bank 0, bit %3d,  %d bytes): ", FIELD_SECURE_BIT, FIELD_SECURE_SIZE);
         for (i = 24; i < 24 + FIELD_SECURE_SIZE; i++)
             rt_kprintf("%02X", buf[i]);
         rt_kprintf("  => secure_enabled = 0x%02X\n", buf[24]);
     }
 
-    /* ROOT KEY: bank 3, byte 0-31 — may read as 0x00.. by design (non-readable to software). */
+    /* ROOT_KEY: bank 3 (bit 768-1023) — non-readable to CPU on SF32LB52X by design */
     if (efuse_read_bank(3, buf) == 0)
     {
-        rt_kprintf("ROOT_KEY    (bit %3d, %2d bytes): ", FIELD_ROOT_BIT, FIELD_ROOT_SIZE);
+        rt_kprintf("ROOT_KEY    (bank 3, bit %3d, %2d bytes): ", FIELD_ROOT_BIT, FIELD_ROOT_SIZE);
         for (i = 0; i < FIELD_ROOT_SIZE; i++)
             rt_kprintf("%02X", buf[i]);
         rt_kprintf("\n");
-        rt_kprintf("            (note: BANK3 is non-readable to CPU on 52x; zeros here do not mean empty key.)\n");
+        rt_kprintf("            (note: if all zeros and ROOT_KEY was written, hardware may block reads after SECURE_FLAG is set.)\n");
     }
 }
 
@@ -167,7 +198,7 @@ static void cmd_efuse_read(int bit_offset, int size)
     }
 
     if (efuse_offset_in_bank3(bit_offset))
-        rt_kprintf("Note: BANK3 is non-readable to CPU on 52x; data may be all zeros.\n");
+        rt_kprintf("Note: BANK3 is readable; zeros here mean key was not programmed yet.\n");
 
     HAL_EFUSE_Init();
     ret = HAL_EFUSE_Read((uint16_t)bit_offset, buf, size);
@@ -181,32 +212,13 @@ static void cmd_efuse_read(int bit_offset, int size)
     hex_dump(buf, size, bit_offset / 8);
 }
 
-static void efuse_pa30_enable(uint32_t *saved_pa30)
-{
-#ifdef SF32LB52X
-    *saved_pa30 = hwp_pinmux1->PAD_PA30;
-    uint32_t val = *saved_pa30;
-    val &= ~HPSYS_PINMUX_PAD_PA30_FSEL_Msk;
-    val |= (2u << HPSYS_PINMUX_PAD_PA30_FSEL_Pos);
-    val &= ~HPSYS_PINMUX_PAD_PA30_IE_Msk;
-    hwp_pinmux1->PAD_PA30 = val;
-    HAL_Delay_us(10);
-#else
-    *saved_pa30 = 0;
-#endif
-}
-
-static void efuse_pa30_restore(uint32_t saved_pa30)
-{
-#ifdef SF32LB52X
-    hwp_pinmux1->PAD_PA30 = saved_pa30;
-#endif
-}
-
 static void cmd_efuse_write(int bit_offset, const char *hex_str)
 {
     uint8_t buf[EFUSE_BANK_BYTES];
     int hex_len, data_len, i, ret;
+    uint32_t saved_pa30 = 0;
+    int chunk;
+    int total_ok = 1;
 
     hex_len = (int)strlen(hex_str);
     if (hex_len & 1)
@@ -251,13 +263,12 @@ static void cmd_efuse_write(int bit_offset, const char *hex_str)
     }
 
     rt_kprintf("WARNING: eFuse write is IRREVERSIBLE! Bits can only be set 0->1, never cleared.\n");
-    rt_kprintf("  bit_offset = %d (bank %d, byte %d)\n",
-               bit_offset, bit_offset / 256, (bit_offset / 8) % EFUSE_BANK_BYTES);
-    rt_kprintf("  data (%d bytes) = ", data_len);
-    for (i = 0; i < data_len; i++)
-        rt_kprintf("%02X", buf[i]);
-    rt_kprintf("\n");
-    rt_kprintf("Proceeding with write...\n");
+    rt_kprintf("  bit_offset=%d (bank %d, byte %d), %d bytes in %d x 4-byte chunks\n",
+               bit_offset, bit_offset / 256, (bit_offset / 8) % EFUSE_BANK_BYTES,
+               data_len, data_len / 4);
+    rt_kprintf("  data = ");
+    for (i = 0; i < data_len; i++) rt_kprintf("%02X", buf[i]);
+    rt_kprintf("\nProceeding with write...\n");
 
     {
         HAL_StatusTypeDef init_rc = HAL_EFUSE_Init();
@@ -276,57 +287,113 @@ static void cmd_efuse_write(int bit_offset, const char *hex_str)
                (unsigned)hwp_pinmux1->PAD_PA30);
 #endif
 
-    uint32_t saved_pa30;
-    efuse_pa30_enable(&saved_pa30);
-    rt_kprintf("  PA30 -> EFUSE_PWR (sel=2)\n");
-
-    ret = HAL_EFUSE_Write((uint16_t)bit_offset, buf, data_len);
-
-    efuse_pa30_restore(saved_pa30);
-
+    efuse_pwr_route_enable(&saved_pa30);
 #ifdef SF32LB52X
-    rt_kprintf("  After write: HPSYS_VOUT=0x%x, ANAU_CR=0x%08x\n",
-               (unsigned)hwp_pmuc->HPSYS_VOUT,
-               (unsigned)hwp_hpsys_cfg->ANAU_CR);
+    rt_kprintf("  PAD_PA30 switched to EFUSE_PWR, PAD_PA30=0x%08x\n",
+               (unsigned)hwp_pinmux1->PAD_PA30);
 #endif
 
-    if (ret != data_len)
+    /* Write in 4-byte (32-bit) chunks. Each HAL_EFUSE_Write call is limited to 4 bytes so
+     * only 32 cells are active per programming pulse, keeping LDO load minimal. */
+    for (chunk = 0; chunk < data_len; chunk += 4)
     {
-        rt_kprintf("HAL_EFUSE_Write FAILED (ret=%d, expected=%d)\n", ret, data_len);
-        return;
-    }
-    rt_kprintf("HAL_EFUSE_Write OK (ret=%d).\n", ret);
+        uint8_t *chunk_target = buf + chunk;
+        int chunk_offset = bit_offset + chunk * 8;
 
-    if (efuse_offset_in_bank3(bit_offset))
-    {
-        rt_kprintf("BANK3 (root key): per SiFli 52x security doc, this bank is not readable by software.\n");
-        rt_kprintf("Read-back verify is skipped; all-zero read is normal. Confirm via secure boot / AES root key.\n");
-        rt_kprintf("To test the programming path on a readable OTP region first, try SIG_HASH (bit 128, 8 bytes).\n");
-        return;
+        rt_kprintf("\n[Chunk %d/%d] bit=%d data=%02X%02X%02X%02X\n",
+                   chunk / 4 + 1, data_len / 4, chunk_offset,
+                   chunk_target[0], chunk_target[1], chunk_target[2], chunk_target[3]);
+
+        {
+            /* All banks (including bank3): iterative retry with read-back verify (max 50 tries).
+             * Per the user manual section 13.3.4.2, bank3 IS readable unless bank0[253:252]=0b11
+             * is set (masking only happens after SECURE_FLAG is programmed). */
+            uint8_t current[4], missing[4], prev_missing[4];
+            int attempt, ok = 0, stall_count = 0;
+
+            ret = HAL_EFUSE_Read((uint16_t)chunk_offset, current, 4);
+            if (ret != 4) memset(current, 0, 4);
+            rt_kprintf("  pre-read: %02X%02X%02X%02X\n",
+                       current[0], current[1], current[2], current[3]);
+            memset(prev_missing, 0xff, 4);
+
+            for (attempt = 1; attempt <= 200; attempt++)
+            {
+                int all_done = 1;
+                for (i = 0; i < 4; i++)
+                {
+                    missing[i] = chunk_target[i] & ~current[i];
+                    if (missing[i]) all_done = 0;
+                }
+                if (all_done)
+                {
+                    rt_kprintf("  all bits set before try %d!\n", attempt);
+                    ok = 1;
+                    break;
+                }
+
+                /* Detect stall: if missing bits unchanged, count stall and apply a
+                 * longer cool-down every 10 consecutive non-progressing attempts.
+                 * This gives hard fuse cells a thermal recovery break. */
+                if (memcmp(missing, prev_missing, 4) == 0)
+                    stall_count++;
+                else
+                    stall_count = 0;
+                memcpy(prev_missing, missing, 4);
+
+                if (stall_count > 0 && (stall_count % 10) == 0)
+                {
+                    rt_kprintf("  [stall %d, cooling 500ms...]\n", stall_count);
+                    rt_thread_mdelay(500);
+                }
+
+                rt_kprintf("  try %d missing=%02X%02X%02X%02X",
+                           attempt, missing[0], missing[1], missing[2], missing[3]);
+
+                __HAL_SYSCFG_SET_SECURITY();
+                ret = HAL_EFUSE_Write((uint16_t)chunk_offset, missing, 4);
+                __HAL_SYSCFG_CLEAR_SECURITY();
+
+                /* Expected: ANACR=0x71f (LDO_EN|VREF=7|LDO_MODE|LDO_DC_TR=7) */
+                rt_kprintf(" ANACR=0x%x ready=%u\n",
+                           (unsigned)hal_efuse_dbg_anacr,
+                           (unsigned)hal_efuse_dbg_ready);
+
+                rt_thread_mdelay(50);
+                ret = HAL_EFUSE_Read((uint16_t)chunk_offset, current, 4);
+                if (ret != 4) continue;
+
+                rt_kprintf("  after try %d: %02X%02X%02X%02X\n",
+                           attempt, current[0], current[1], current[2], current[3]);
+
+                int satisfied = 1;
+                for (i = 0; i < 4; i++)
+                {
+                    if ((current[i] & chunk_target[i]) != chunk_target[i])
+                    { satisfied = 0; break; }
+                }
+                if (satisfied) { rt_kprintf("  chunk PASSED on try %d\n", attempt); ok = 1; break; }
+                rt_thread_mdelay(20);
+            }
+
+            if (!ok)
+            {
+                rt_kprintf("  chunk FAILED! final=%02X%02X%02X%02X still_missing=%02X%02X%02X%02X\n",
+                           current[0], current[1], current[2], current[3],
+                           chunk_target[0] & ~current[0], chunk_target[1] & ~current[1],
+                           chunk_target[2] & ~current[2], chunk_target[3] & ~current[3]);
+                total_ok = 0;
+            }
+        }
     }
 
-    rt_kprintf("Verifying by read-back...\n");
-    {
-        uint8_t verify[EFUSE_BANK_BYTES];
-        ret = HAL_EFUSE_Read((uint16_t)bit_offset, verify, data_len);
-        if (ret != data_len)
-        {
-            rt_kprintf("Verify read failed (ret=%d)\n", ret);
-            return;
-        }
-        if (memcmp(buf, verify, data_len) == 0)
-            rt_kprintf("Verify PASSED!\n");
-        else
-        {
-            rt_kprintf("Verify MISMATCH!\n  Written: ");
-            for (i = 0; i < data_len; i++)
-                rt_kprintf("%02X", buf[i]);
-            rt_kprintf("\n  Read:    ");
-            for (i = 0; i < data_len; i++)
-                rt_kprintf("%02X", verify[i]);
-            rt_kprintf("\n");
-        }
-    }
+    efuse_pwr_route_restore(saved_pa30);
+
+    rt_kprintf("\n");
+    if (total_ok)
+        rt_kprintf("All chunks verified OK.\n");
+    else
+        rt_kprintf("WARNING: one or more chunks failed. Check output above.\n");
 }
 
 /* Reserved bank2 bytes 64-67 (bit 512): prefer for autotest — bank1 may already be partially used. */
@@ -389,14 +456,15 @@ static void cmd_efuse_test(int argc, char *argv[])
     rt_kprintf("EFUSE_TEST write %d bytes at bit %d (target OR old), up to 6 tries...\n",
                EFUSE_AUTOTEST_SIZE, EFUSE_AUTOTEST_BIT_OFFSET);
     {
-        uint32_t saved_pa30;
+        uint32_t saved_pa30 = 0;
         int attempt;
+        efuse_pwr_route_enable(&saved_pa30);
 
         for (attempt = 1; attempt <= 6; attempt++)
         {
-            efuse_pa30_enable(&saved_pa30);
+            __HAL_SYSCFG_SET_SECURITY();
             ret = HAL_EFUSE_Write((uint16_t)EFUSE_AUTOTEST_BIT_OFFSET, expect, EFUSE_AUTOTEST_SIZE);
-            efuse_pa30_restore(saved_pa30);
+            __HAL_SYSCFG_CLEAR_SECURITY();
 
             if (ret != EFUSE_AUTOTEST_SIZE)
             {
@@ -436,6 +504,7 @@ static void cmd_efuse_test(int argc, char *argv[])
                 rt_thread_mdelay(50);
         }
 
+        efuse_pwr_route_restore(saved_pa30);
         rt_kprintf("EFUSE_TEST_RESULT FAIL mismatch\n");
     }
 }

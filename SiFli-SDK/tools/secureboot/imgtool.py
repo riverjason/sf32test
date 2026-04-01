@@ -155,63 +155,51 @@ def encrypt_image_help_static(img, eimg) :
     # 3. Generate Header
     
     cnt_prefix=open(FLAGS.sigkey+"_hash.bin", "rb").read(8)
-    cnt_prefix+='\x00'*4
-    #print_hex(cnt_prefix)
-    #print("\r\n")
-    # img_len(4 bytes)+bksize(2 bytes) + flags(2 bytes) + session_key(32 bytes) + signature(256 bytes) = 296 bytes
-    # cnter=Counter.new(32,prefix=cnt_prefix,initial_value=0)
-    #iv_val=open(FLAGS.sigkey+"_hash.bin", "rb").read(8)
-    
-    #2.1 encrypt session key
+    cnt_prefix+=b'\x00'*4
+
+    #2.1 encrypt session key with AES-CBC(ROOT_KEY, UID_IV) — matches sifli_hw_init_xip_key
     cipher_core_aes = AES.new(recipient_key, AES.MODE_CBC, uid)
-    #cipher_core_des = AES.new(recipient_key, AES.MODE_CBC, uid)
     enc_session = cipher_core_aes.encrypt(session_key)
- 
-   
-    bksize=struct.pack("<H", FLAGS.bksize)    
-    flags=struct.pack("<H", FLAGS.flags)    
+
+    bksize=struct.pack("<H", FLAGS.bksize)
+    flags=struct.pack("<H", FLAGS.flags)
     header=img_len+bksize+flags+enc_session
 
-    #dec_session = cipher_core_des.decrypt(enc_session)
-
-    # 3.1 Insert header to ftab
-    #print(FLAGS.sigkey)
+    # 3.1 Insert sig_pub_key and image header into ftab
     sig_key=open(FLAGS.sigkey + "_pub.der", "rb").read()
     sig_len=len(sig_key)
-    
     hd_len=len(header)
-    
     file_hd=open(FLAGS.table, "rb")
     ftab_binary = file_hd.read()
-    #print("sig len", len(sig_key), "total len", len(ftab_binary))
-    data_new = ftab_binary[0:SIG_OFFSET]+sig_key+ftab_binary[(SIG_OFFSET+sig_len):IMG_OFFSET]+header+ftab_binary[(IMG_OFFSET+hd_len):len(ftab_binary)]    
-    
+    data_new = ftab_binary[0:SIG_OFFSET]+sig_key+ftab_binary[(SIG_OFFSET+sig_len):IMG_OFFSET]+header+ftab_binary[(IMG_OFFSET+hd_len):len(ftab_binary)]
     file_wr=open("enc_"+FLAGS.table,"wb")
     file_wr.write(data_new)
 
-    # 4. Encrypt image
+    # 4. Encrypt image with AES-CTR(session_key, SIG_HASH_ctr)
     i=0
-
     cnter=Counter.new(32,prefix=cnt_prefix,initial_value=0)
     cipher_aes = AES.new(session_key, AES.MODE_CTR,counter=cnter)
-    data3=''
-    cipherimage=''
+    data3=b''
     while (i<len(data)):
-        # 7.1 Generate Hash+offset, data block
         if (i+FLAGS.bksize<len(data)):
             data2=data[i:i+FLAGS.bksize]
         else:
             data2=data[i:len(data)]
-        # 7.2 encrypt data block    
-        ciphertext= cipher_aes.encrypt(data2)     
-        
-        # 7.3 Save each encrypted block
+        ciphertext= cipher_aes.encrypt(bytes(data2))
         data3+=ciphertext
         i+=len(data2)
 
-   
+    #5. Sign the encrypted image
+    if FLAGS.sigkey:
+        hash=SHA256.new(data3)
+        pri_key = RSA.import_key(open(FLAGS.sigkey+"_pri.pem").read())
+        sign_rsa = pkcs1_15.new(pri_key)
+        signature = sign_rsa.sign(hash)
+        header+=signature
+
     #7. Save to encrypted image file
     file_out=open(eimg, "wb")
+    file_out.write(header)
     file_out.write(data3)
     
 def encrypt_image_static() :

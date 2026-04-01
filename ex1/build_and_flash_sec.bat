@@ -1,7 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set ROOT_DIR=E:\study\sf32\ex1
+set ROOT_DIR=D:\dev\sf32\sf32test\ex1
 
 echo ========================================================
 echo   SF32LB52 Secure Build ^& Flash

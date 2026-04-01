@@ -47,6 +47,17 @@
 
 #include "bf0_hal.h"
 
+#ifdef SF32LB52X
+/* Diagnostic variables filled by HAL_EFUSE_Write; printed by caller (e.g. efuse_cmd.c). */
+volatile uint32_t hal_efuse_dbg_sr_before;
+volatile uint32_t hal_efuse_dbg_anacr;
+volatile uint32_t hal_efuse_dbg_anau;
+volatile uint32_t hal_efuse_dbg_timr;
+volatile uint32_t hal_efuse_dbg_cr_before;
+volatile uint32_t hal_efuse_dbg_ready;
+volatile uint32_t hal_efuse_dbg_timeout;
+#endif
+
 /** @addtogroup BF0_HAL_Driver
   * @{
   */
@@ -153,8 +164,31 @@ int32_t HAL_EFUSE_Write(uint16_t bit_offset, uint8_t *data, int32_t size)
     hwp_efusec->SR = EFUSEC_SR_DONE;
 
 #ifdef SF32LB52X
-    /* Bootloader uses fixed TIMR for eFuse; calculated TIMR can fail PGM at some PCLKs. */
-    hwp_efusec->TIMR = 0x2D08F;
+    /*
+     * The EFUSE controller on SF32LB52X uses an internal clock of ~18 MHz (from the
+     * peripheral bus divider), NOT the raw HCPU PCLK.  HAL_EFUSE_Init() calculates
+     * TIMR from raw PCLK which produces a far-too-long pulse at application speeds
+     * (e.g. TCKHP=1200 @ 120 MHz PCLK = 10 µs from the CPU's view, but 66 µs from
+     * the EFUSE controller's view at 18 MHz internal clock).  A 66 µs pulse causes
+     * LDO voltage sag and makes all writes fail completely.
+     *
+     * The bootloader value 0x2D08F has TCKHP=180 cycles.
+     * At 18 MHz EFUSE clock: 180/18 MHz = 10 µs  -> exactly the spec target.
+     *
+     * We use TCKHP=270 (0x43C8F) which gives ~18 µs at 15 MHz internal EFUSE clock.
+     * This is the empirically determined optimum: longer pulses (540+) cause LDO
+     * voltage droop because already-fused (low-impedance) cells continuously sink
+     * current for the full pulse duration, leaving insufficient voltage for the
+     * remaining high-threshold cells.
+     * THRCK=15, THPCK=1 are kept the same as the bootloader value.
+     *
+     * TIMR encoding (efusec.h):
+     *   bits[ 6: 0] THRCK = 15   (read hold)
+     *   bits[ 9: 7] THPCK =  1   (setup)
+     *   bits[20:10] TCKHP = 270  (pgm pulse, 270/15 MHz = 18 µs)
+     * => 0x43C8F
+     */
+    hwp_efusec->TIMR = 0x43C8F;
 #endif
 
 #if defined(SF32LB55X) || defined(SF32LB58X)
@@ -212,8 +246,17 @@ int32_t HAL_EFUSE_Write(uint16_t bit_offset, uint8_t *data, int32_t size)
     HAL_Delay_us(200);
     MODIFY_REG(hwp_hpsys_cfg->ANAU_CR, HPSYS_CFG_ANAU_CR_EFUSE_VDD_PD, HPSYS_CFG_ANAU_CR_EFUSE_VDD_EN);
     anacr_org = READ_REG(hwp_efusec->ANACR);
-    MODIFY_REG(hwp_efusec->ANACR, EFUSEC_ANACR_LDO_VREF_SEL_Msk,
-               (7U << EFUSEC_ANACR_LDO_VREF_SEL_Pos));
+    /*
+     * Set LDO_MODE=1 (program mode, ~2V output), VREF=7 (max reference), and
+     * LDO_DC_TR=7 (maximum LDO transconductance/drive current).
+     * LDO_DC_TR=7 is critical for "hard" eFuse cells that require more current
+     * to maintain the programming voltage, especially when few cells remain and
+     * the LDO load is very light (high-impedance unfused cells only).
+     */
+    MODIFY_REG(hwp_efusec->ANACR,
+               EFUSEC_ANACR_LDO_VREF_SEL_Msk | EFUSEC_ANACR_LDO_MODE_Msk | EFUSEC_ANACR_LDO_DC_TR_Msk,
+               (7U << EFUSEC_ANACR_LDO_VREF_SEL_Pos) | (1U << EFUSEC_ANACR_LDO_MODE_Pos) |
+               (7U << EFUSEC_ANACR_LDO_DC_TR_Pos));
     hwp_efusec->ANACR |= EFUSEC_ANACR_LDO_EN;
 #else
     hwp_efusec->ANACR |= EFUSEC_ANACR_LDO_EN;
@@ -237,6 +280,14 @@ int32_t HAL_EFUSE_Write(uint16_t bit_offset, uint8_t *data, int32_t size)
         data += 4;
     }
     /* start program */
+#ifdef SF32LB52X
+    /* Store diagnostics in global variables; caller (efuse_cmd.c) prints them via rt_kprintf. */
+    hal_efuse_dbg_sr_before  = hwp_efusec->SR;
+    hal_efuse_dbg_anacr      = hwp_efusec->ANACR;
+    hal_efuse_dbg_anau       = hwp_hpsys_cfg->ANAU_CR;
+    hal_efuse_dbg_timr       = hwp_efusec->TIMR;
+    hal_efuse_dbg_cr_before  = hwp_efusec->CR;
+#endif
     hwp_efusec->CR |= EFUSEC_CR_EN;
 #ifdef SF32LB52X
     HAL_Delay_us(15);
@@ -252,6 +303,10 @@ int32_t HAL_EFUSE_Write(uint16_t bit_offset, uint8_t *data, int32_t size)
     while (((hwp_efusec->SR & EFUSEC_SR_DONE) == 0) && (ready < timeout))
         ready++;
     hwp_efusec->SR |= EFUSEC_SR_DONE;
+#ifdef SF32LB52X
+    hal_efuse_dbg_ready   = ready;
+    hal_efuse_dbg_timeout = timeout;
+#endif
 
     if (ready >= timeout)
     {

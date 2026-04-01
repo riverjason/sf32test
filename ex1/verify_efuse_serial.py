@@ -23,6 +23,17 @@ def _has_prompt(data: bytes) -> bool:
     return False
 
 
+def _safe_print(text: str) -> None:
+    """Print text without crashing on non-UTF8 Windows console encodings."""
+    try:
+        print(text, end="")
+    except UnicodeEncodeError:
+        # Fallback for GBK/other legacy consoles.
+        data = text.encode(sys.stdout.encoding or "utf-8", errors="replace")
+        sys.stdout.buffer.write(data)
+        sys.stdout.flush()
+
+
 def wait_for_prompt(ser, idle_timeout: float, total_timeout: float) -> bytes:
     """Read until msh prompt appears or total_timeout."""
     deadline = time.time() + total_timeout
@@ -137,7 +148,7 @@ def main() -> int:
         boot_tail = wait_for_prompt(ser, idle_timeout=0.5, total_timeout=args.prompt_timeout)
         text0 = boot_tail.decode("utf-8", errors="replace")
         all_out += text0
-        print(text0, end="")
+        _safe_print(text0)
 
         if not _has_prompt(boot_tail):
             # one more CRLF
@@ -146,7 +157,7 @@ def main() -> int:
             more = wait_for_prompt(ser, idle_timeout=0.5, total_timeout=8.0)
             tmore = more.decode("utf-8", errors="replace")
             all_out += tmore
-            print(tmore, end="")
+            _safe_print(tmore)
 
         for cmd in cmds:
             line = cmd.strip() + "\r\n"
@@ -155,7 +166,7 @@ def main() -> int:
             chunk = wait_for_prompt(ser, idle_timeout=0.3, total_timeout=12.0)
             t = chunk.decode("utf-8", errors="replace")
             all_out += t
-            print(t, end="")
+            _safe_print(t)
 
     finally:
         ser.close()
