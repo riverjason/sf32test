@@ -22,6 +22,7 @@
 #define CMD_FINISH  0x04
 #define CMD_ABORT   0x05
 #define CMD_REBOOT  0x06
+#define CMD_TARGET  0x07
 #define CMD_RSP     0x80
 
 #define MAX_FRAME_PAYLOAD 512
@@ -38,6 +39,8 @@ static uint32_t s_image_ofs;
 static uint32_t s_finish_size;
 static uint32_t s_finish_crc;
 static uint32_t s_target_base = UART_OTA_SLOT_B_BASE;
+static uint32_t s_target_size = UART_OTA_SLOT_SIZE;
+static uint32_t s_image_slot_base;
 
 /* ---- CRC32 (IEEE / zlib, poly 0xEDB88320) ---- */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *p, int len)
@@ -97,6 +100,11 @@ static uint32_t get_active_slot_base(void)
 static uint32_t pick_target_slot_base(void)
 {
     return (get_active_slot_base() == UART_OTA_SLOT_A_BASE) ? UART_OTA_SLOT_B_BASE : UART_OTA_SLOT_A_BASE;
+}
+
+static uint32_t pick_target_ftab_base(void)
+{
+    return (get_active_slot_base() == UART_OTA_SLOT_A_BASE) ? UART_OTA_FTAB_B_BASE : UART_OTA_FTAB_A_BASE;
 }
 
 static void set_try_boot_for_target(uint32_t target_base)
@@ -180,18 +188,20 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
     {
     case CMD_HELLO:
     {
-        uint32_t info[3];
+        uint32_t info[4];
         s_target_base = pick_target_slot_base();
+        s_target_size = UART_OTA_SLOT_SIZE;
+        s_image_slot_base = s_target_base;
         info[0] = s_target_base;
         info[1] = UART_OTA_MAX_IMAGE_SIZE;
         info[2] = MAX_FRAME_PAYLOAD;
+        info[3] = pick_target_ftab_base();
         send_rsp(CMD_HELLO, 0, (uint8_t *)info, sizeof(info));
         break;
     }
     case CMD_ERASE_B:
-        s_target_base = pick_target_slot_base();
         s_image_ofs = 0;
-        if (flash_erase_range(s_target_base, UART_OTA_SLOT_SIZE) != 0)
+        if (flash_erase_range(s_target_base, s_target_size) != 0)
             send_rsp(CMD_ERASE_B, 1, RT_NULL, 0);
         else
             send_rsp(CMD_ERASE_B, 0, RT_NULL, 0);
@@ -206,7 +216,7 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
             uint32_t off = (uint32_t)pl[0] | ((uint32_t)pl[1] << 8) | ((uint32_t)pl[2] << 16) | ((uint32_t)pl[3] << 24);
             const uint8_t *dp = pl + 4;
             uint16_t dlen = (uint16_t)(plen - 4);
-            if (off + dlen > UART_OTA_MAX_IMAGE_SIZE)
+            if (off + dlen > s_target_size)
             {
                 send_rsp(CMD_DATA, 3, RT_NULL, 0);
                 break;
@@ -242,7 +252,7 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
         }
         s_finish_size = (uint32_t)pl[0] | ((uint32_t)pl[1] << 8) | ((uint32_t)pl[2] << 16) | ((uint32_t)pl[3] << 24);
         s_finish_crc = (uint32_t)pl[4] | ((uint32_t)pl[5] << 8) | ((uint32_t)pl[6] << 16) | ((uint32_t)pl[7] << 24);
-        if (s_finish_size == 0 || s_finish_size > UART_OTA_MAX_IMAGE_SIZE)
+        if (s_finish_size == 0 || s_finish_size > s_target_size)
         {
             send_rsp(CMD_FINISH, 2, RT_NULL, 0);
             break;
@@ -258,18 +268,52 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
                 break;
             }
         }
-        if (write_meta(s_target_base, s_finish_size, s_finish_crc) != 0)
-            send_rsp(CMD_FINISH, 4, RT_NULL, 0);
-        else
+        if (s_target_base == UART_OTA_FTAB_A_BASE || s_target_base == UART_OTA_FTAB_B_BASE)
+        {
             send_rsp(CMD_FINISH, 0, RT_NULL, 0);
+        }
+        else
+        {
+            if (write_meta(s_target_base, s_finish_size, s_finish_crc) != 0)
+                send_rsp(CMD_FINISH, 4, RT_NULL, 0);
+            else
+                send_rsp(CMD_FINISH, 0, RT_NULL, 0);
+        }
         break;
     case CMD_ABORT:
         send_rsp(CMD_ABORT, 0, RT_NULL, 0);
         break;
     case CMD_REBOOT:
-        set_try_boot_for_target(s_target_base);
+        set_try_boot_for_target(s_image_slot_base);
         send_rsp(CMD_REBOOT, 0, RT_NULL, 0);
         HAL_PMU_Reboot();
+        break;
+    case CMD_TARGET:
+        if (plen < 8)
+        {
+            send_rsp(CMD_TARGET, 1, RT_NULL, 0);
+            break;
+        }
+        {
+            uint32_t base = (uint32_t)pl[0] | ((uint32_t)pl[1] << 8) | ((uint32_t)pl[2] << 16) | ((uint32_t)pl[3] << 24);
+            uint32_t size = (uint32_t)pl[4] | ((uint32_t)pl[5] << 8) | ((uint32_t)pl[6] << 16) | ((uint32_t)pl[7] << 24);
+            rt_bool_t ok = RT_FALSE;
+            if (base == pick_target_slot_base() && size <= UART_OTA_SLOT_SIZE)
+                ok = RT_TRUE;
+            else if (base == pick_target_ftab_base() && size <= UART_OTA_FTAB_SIZE)
+                ok = RT_TRUE;
+            if (ok)
+            {
+                s_target_base = base;
+                s_target_size = size;
+                s_image_ofs = 0;
+                send_rsp(CMD_TARGET, 0, RT_NULL, 0);
+            }
+            else
+            {
+                send_rsp(CMD_TARGET, 2, RT_NULL, 0);
+            }
+        }
         break;
     default:
         send_rsp(cmd, 0xFF, RT_NULL, 0);
@@ -360,7 +404,9 @@ int uart_ota_mode_enter(void)
     rt_kprintf("\n*** UART_OTA_MODE ***\nClose msh, use PC tool. uart_ota exit when done.\n");
     {
         s_target_base = pick_target_slot_base();
-        uint32_t info[3] = {s_target_base, UART_OTA_MAX_IMAGE_SIZE, MAX_FRAME_PAYLOAD};
+        s_target_size = UART_OTA_SLOT_SIZE;
+        s_image_slot_base = s_target_base;
+        uint32_t info[4] = {s_target_base, UART_OTA_MAX_IMAGE_SIZE, MAX_FRAME_PAYLOAD, pick_target_ftab_base()};
         send_rsp(CMD_HELLO, 0, (uint8_t *)info, sizeof(info));
     }
     return 0;
@@ -379,6 +425,16 @@ void uart_ota_mode_exit(void)
     rt_kprintf("UART OTA mode off, finsh restored.\n");
 }
 
+static void write_active_persist(int slot_is_b)
+{
+    struct ab_persist m;
+    m.magic       = UART_OTA_AB_PERSIST_MAGIC;
+    m.active_slot = slot_is_b ? 1 : 0;
+
+    flash_erase_range(UART_OTA_AB_PERSIST_ADDR, 0x1000);
+    flash_write_at(UART_OTA_AB_PERSIST_ADDR, (const uint8_t *)&m, sizeof(m));
+}
+
 void uart_ota_init(void)
 {
     uint32_t commit = HAL_Get_backup(UART_OTA_BOOT_COMMIT_IDX);
@@ -386,13 +442,15 @@ void uart_ota_init(void)
     {
         HAL_Set_backup(UART_OTA_BOOT_ACTIVE_IDX, UART_OTA_BOOT_ACTIVE_A);
         HAL_Set_backup(UART_OTA_BOOT_COMMIT_IDX, 0);
-        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=A\n");
+        write_active_persist(0);
+        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=A (persisted to flash)\n");
     }
     else if (commit == UART_OTA_BOOT_COMMIT_B)
     {
         HAL_Set_backup(UART_OTA_BOOT_ACTIVE_IDX, UART_OTA_BOOT_ACTIVE_B);
         HAL_Set_backup(UART_OTA_BOOT_COMMIT_IDX, 0);
-        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=B\n");
+        write_active_persist(1);
+        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=B (persisted to flash)\n");
     }
     else
     {
@@ -426,19 +484,20 @@ static int cmd_uart_ota(int argc, char **argv)
         uart_ota_mode_exit();
     else if (strcmp(argv[1], "reboot") == 0)
     {
-        s_target_base = pick_target_slot_base();
-        set_try_boot_for_target(s_target_base);
-        rt_kprintf("Set TRY->Slot %s and reboot now.\n", slot_name(s_target_base));
+        uint32_t target = pick_target_slot_base();
+        set_try_boot_for_target(target);
+        rt_kprintf("Set TRY->Slot %s and reboot now.\n", slot_name(target));
         rt_thread_mdelay(50);
         HAL_PMU_Reboot();
     }
     else if (strcmp(argv[1], "status") == 0)
     {
-        rt_kprintf("Slot A: 0x%08lx size 0x%lx (running)\n", (unsigned long)UART_OTA_SLOT_A_BASE,
-                   (unsigned long)UART_OTA_SLOT_SIZE);
-        rt_kprintf("Slot B: 0x%08lx size 0x%lx (alternate)\n", (unsigned long)UART_OTA_SLOT_B_BASE,
-                   (unsigned long)UART_OTA_SLOT_SIZE);
-        rt_kprintf("Max image (excl. meta): %lu bytes\n", (unsigned long)UART_OTA_MAX_IMAGE_SIZE);
+        rt_kprintf("Slot A: img 0x%08lx  ftab 0x%08lx\n",
+                   (unsigned long)UART_OTA_SLOT_A_BASE, (unsigned long)UART_OTA_FTAB_A_BASE);
+        rt_kprintf("Slot B: img 0x%08lx  ftab 0x%08lx\n",
+                   (unsigned long)UART_OTA_SLOT_B_BASE, (unsigned long)UART_OTA_FTAB_B_BASE);
+        rt_kprintf("Slot size: 0x%lx  ftab size: 0x%lx\n",
+                   (unsigned long)UART_OTA_SLOT_SIZE, (unsigned long)UART_OTA_FTAB_SIZE);
         {
             uint32_t active = HAL_Get_backup(UART_OTA_BOOT_ACTIVE_IDX);
             uint32_t trial = HAL_Get_backup(UART_OTA_BOOT_TRY_IDX);

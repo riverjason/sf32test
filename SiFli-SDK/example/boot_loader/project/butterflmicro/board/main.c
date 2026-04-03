@@ -17,28 +17,26 @@
 #include "../dfu_pan/dfu_pan_macro.h"
 #include "boot_flash.h"
 #include "secboot.h"
+#ifdef PKG_SIFLI_MBEDTLS_BOOT
+#include "mbedtls/sha256.h"
+#endif
 
+/* A/B ftab: ftab_B lives in the 32 KB gap (0x12008000) before the bootloader */
+#define FTAB_A_ADDR     0x12000000UL
+#define FTAB_B_ADDR     0x12008000UL
 
+#define AB_PERSIST_MAGIC    0x41425053UL /* "ABPS" */
 
-// Check if OTA program is valid
-int is_ota_program_valid(uint32_t ota_addr)
+static int get_cold_boot_slot(void)
 {
-    uint32_t sp_val = 0, pc_val = 0;
-    
-    // Read the vector table of the OTA program
-    g_flash_read(ota_addr, (const int8_t*)&sp_val, sizeof(uint32_t));
-    g_flash_read(ota_addr + 4, (const int8_t*)&pc_val, sizeof(uint32_t));
-    
-    // Simple validation of vector table validity (check if stack pointer is in reasonable range)
-    if ((sp_val & 0xFFFF0000) == 0x20000000) // Stack pointer should be in RAM area
-    {
-        return 1; // OTA program is valid
-    }
-    
-    return 0; // OTA program is invalid
+    struct { uint32_t magic; uint32_t active; } m;
+    if (DFU_DOWNLOAD_REGION_START_ADDR == FLASH_UNINIT_32)
+        return 0;
+    g_flash_read(DFU_DOWNLOAD_REGION_START_ADDR, (const int8_t *)&m, sizeof(m));
+    if (m.magic == AB_PERSIST_MAGIC && m.active == 1)
+        return 1;
+    return 0;
 }
-
-
 
 int board_boot_src;
 struct sec_configuration sec_config_cache;
@@ -92,8 +90,8 @@ void boot_test(void)
 
 /* A/B OTA boot policy */
 #define BOOT_SLOT_A_XIP     0x12020000UL
-#define BOOT_SLOT_B_PHYS    0x123A0000UL
-#define BOOT_SLOT_SIZE      0x00380000UL
+#define BOOT_SLOT_B_PHYS    0x12420000UL
+#define BOOT_SLOT_SIZE      0x00400000UL
 #define BOOT_ACTIVE_IDX     9
 #define BOOT_TRY_IDX        8
 #define BOOT_COMMIT_IDX     7
@@ -113,69 +111,30 @@ void run_img(uint32_t dest)
     __asm("LDR PC, [%0, #4]" :: "r"(dest));
 }
 
-static uint32_t get_hcpu_img_len(void)
+static int try_boot_from_slot(int slot_is_b)
 {
-    if (sec_config_cache.magic == SEC_CONFIG_MAGIC
-            && sec_config_cache.running_imgs[CORE_HCPU] != (struct image_header_enc *)FLASH_UNINIT_32)
-    {
-        int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_HCPU] - g_config_addr - 0x1000)
-                       / sizeof(struct image_header_enc) + DFU_FLASH_IMG_LCPU;
-        int coreid = DFU_FLASH_IMG_IDX(flash_id);
-        uint32_t len = sec_config_cache.imgs[coreid].length;
-        if ((len != FLASH_UNINIT_32) && (len > 0) && (len <= BOOT_SLOT_SIZE))
-            return len;
-    }
-    return BOOT_SLOT_SIZE;
-}
+    uint32_t ftab_addr = slot_is_b ? FTAB_B_ADDR : FTAB_A_ADDR;
 
-static int boot_slot_via_alias(uint32_t slot_phys_base)
-{
-    uint32_t sp_val = *(volatile uint32_t *)slot_phys_base;
-    uint32_t alias_len = get_hcpu_img_len();
-    if ((sp_val & 0xFFF00000) != 0x20000000)
-        return 0;
-    board_init_psram();
-    HAL_FLASH_ALIAS_CFG(boot_handle, BOOT_SLOT_A_XIP, alias_len, slot_phys_base - BOOT_SLOT_A_XIP);
-    run_img(BOOT_SLOT_A_XIP);
-    return 1;
-}
+    g_flash_read(ftab_addr, (const int8_t *)&sec_config_cache,
+                 sizeof(sec_config_cache));
+    if (sec_config_cache.magic != SEC_CONFIG_MAGIC)
+        return -1;
 
-static void boot_ab_policy(void)
-{
-    uint32_t active = HAL_Get_backup(BOOT_ACTIVE_IDX);
-    uint32_t trial = HAL_Get_backup(BOOT_TRY_IDX);
+    if (sec_config_cache.running_imgs[CORE_HCPU]
+            == (struct image_header_enc *)FLASH_UNINIT_32)
+        return -1;
 
-    if (active != BOOT_ACTIVE_A && active != BOOT_ACTIVE_B)
-    {
-        active = BOOT_ACTIVE_A;
-        HAL_Set_backup(BOOT_ACTIVE_IDX, active);
-    }
+    int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_HCPU]
+                    - g_config_addr - 0x1000)
+                   / sizeof(struct image_header_enc) + DFU_FLASH_IMG_LCPU;
 
-    /* One-shot trial: clear before jump for automatic rollback on crash. */
-    if (trial == BOOT_TRY_A || trial == BOOT_TRY_B)
-    {
-        HAL_Set_backup(BOOT_TRY_IDX, 0);
-        if (trial == BOOT_TRY_B)
-        {
-            HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_B);
-            if (boot_slot_via_alias(BOOT_SLOT_B_PHYS))
-                return;
-        }
-        else
-        {
-            HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_A);
-            if (boot_slot_via_alias(BOOT_SLOT_A_XIP))
-                return;
-        }
-        HAL_Set_backup(BOOT_COMMIT_IDX, 0);
-    }
+    if (slot_is_b)
+        sec_config_cache.ftab[flash_id].base = BOOT_SLOT_B_PHYS;
 
-    if (active == BOOT_ACTIVE_B)
-    {
-        if (boot_slot_via_alias(BOOT_SLOT_B_PHYS))
-            return;
-        HAL_Set_backup(BOOT_ACTIVE_IDX, BOOT_ACTIVE_A);
-    }
+    dfu_boot_img_in_flash(flash_id);
+
+    HAL_FLASH_AES_CFG(boot_handle, 0);
+    return -1;
 }
 
 uint8_t is_addr_in_nor(uint32_t addr)
@@ -185,6 +144,46 @@ uint8_t is_addr_in_nor(uint32_t addr)
         return 1;
     else
         return 0;
+}
+
+static int secboot_verify_pubkey_sw(uint8_t *pubkey, uint32_t key_size)
+{
+    uint8_t efuse_hash[DFU_SIG_HASH_SIZE] = {0};
+    uint8_t computed[32];
+    int r;
+
+    r = sifli_hw_efuse_read(EFUSE_ID_SIG_HASH, efuse_hash, DFU_SIG_HASH_SIZE);
+    if (r != DFU_SIG_HASH_SIZE)
+        return -1;
+
+#ifdef PKG_SIFLI_MBEDTLS_BOOT
+    mbedtls_sha256(pubkey, key_size, computed, 0);
+#else
+    sifli_hash_calculate(pubkey, key_size, computed, HASH_ALGO_SHA256);
+#endif
+
+    if (memcmp(computed, efuse_hash, DFU_SIG_HASH_SIZE))
+        return -1;
+
+    return 0;
+}
+
+static int secboot_verify_before_run(uint32_t dest, struct image_header_enc *img_hdr)
+{
+    if (secboot_verify_pubkey_sw(sec_config_cache.sig_pub_key, DFU_SIG_KEY_SIZE))
+    {
+        boot_uart_tx(hwp_usart1, (uint8_t *)"SFBLpubkey fail\r\n", 17);
+        return -1;
+    }
+
+    if (sifli_img_sig_hash_verify(img_hdr->sig, sec_config_cache.sig_pub_key,
+                                  (uint8_t *)dest, img_hdr->length))
+    {
+        boot_uart_tx(hwp_usart1, (uint8_t *)"SFBLsig fail\r\n", 14);
+        return -1;
+    }
+
+    return 0;
 }
 
 void dfu_boot_img_in_flash(int flashid)
@@ -226,7 +225,8 @@ void dfu_boot_img_in_flash(int flashid)
                     g_flash_read(src, (const int8_t *)dest, img_hdr->length);
                     sifli_hw_dec(dfu_key1, (uint8_t *)dest, (uint8_t *)dest, img_hdr->length, 0);
                 }
-                run_img(dest);
+                if (secboot_verify_before_run(dest, img_hdr) == 0)
+                    run_img(dest);
             }
         }
     }
@@ -240,7 +240,8 @@ void dfu_boot_img_in_flash(int flashid)
             else if (src != dest)
                 g_flash_read(src, (const int8_t *)dest, img_hdr->length);
 
-            run_img(dest);
+            if (secboot_verify_before_run(dest, img_hdr) == 0)
+                run_img(dest);
         }
     }
 }
@@ -249,85 +250,51 @@ void dfu_boot_img_in_flash(int flashid)
 
 void boot_images_help()
 {
-    /* A/B: process trial/active slot policy first. */
-    boot_ab_policy();
-
-    if (sec_config_cache.magic == SEC_CONFIG_MAGIC)
+#ifdef CFG_BOOTROM
+    if (sec_config_cache.magic == SEC_CONFIG_MAGIC
+            && sec_config_cache.running_imgs[CORE_BL]
+               != (struct image_header_enc *)FLASH_UNINIT_32)
     {
-#ifdef  CFG_BOOTROM
-        if (sec_config_cache.running_imgs[CORE_BL] != (struct image_header_enc *)FLASH_UNINIT_32)
-        {
-            int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_BL] - g_config_addr - 0x1000) / sizeof(struct image_header_enc)
-                           + DFU_FLASH_IMG_LCPU;
-            dfu_boot_img_in_flash(flash_id);
-        }
-#else
-// dfu_pan logical program： 
-        if(DFU_PAN_LOADER_START_ADDR != DFU_PAN_FLASH_UNINIT_32 && DFU_PAN_LOADER_SIZE != DFU_PAN_FLASH_UNINIT_32)
-        {
-            bool needs_update = 0;
-            for (int i = 0; i < MAX_VERSION_FILES; i++) {
-                uint32_t needs_update_addr = VERSION_INFO_BASE_ADDR + i * VERSION_INFO_SIZE + NEEDS_UPDATE_OFFSET;
-                
-                uint32_t needs_update_value = 0;
-                int result = g_flash_read(needs_update_addr, (const int8_t*)&needs_update_value, sizeof(uint32_t));
-                
-                if (result == sizeof(uint32_t) && needs_update_value) {
-                    needs_update = 1;
-                    break;
-                }
-            }
-            if (needs_update) 
-            {       
-                
-                // Check whether the OTA program is functioning properly
-                if (is_ota_program_valid(DFU_PAN_LOADER_START_ADDR))
-                {
-                    // Directly jump to the OTA program
-                    run_img(DFU_PAN_LOADER_START_ADDR);
-                }
-                else
-                {
-                    
-                }
-            }
-        }
-// OTA logical program end
-
-        dfu_install_info info = {0};
-        dfu_install_info info_ext = {0};
-
-        if (DFU_DOWNLOAD_REGION_START_ADDR != FLASH_UNINIT_32)
-        {
-            g_flash_read(DFU_DOWNLOAD_REGION_START_ADDR, (const int8_t *)&info, sizeof(dfu_install_info));
-        }
-        if (DFU_INFO_REGION_START_ADDR != FLASH_UNINIT_32)
-        {
-            g_flash_read(DFU_INFO_REGION_START_ADDR, (const int8_t *)&info_ext, sizeof(dfu_install_info));
-        }
-        if (info.magic == SEC_CONFIG_MAGIC && info_ext.magic == SEC_CONFIG_MAGIC)
-        {
-            info = info_ext;
-        }
-
-        if (DFU_DOWNLOAD_REGION_START_ADDR != FLASH_UNINIT_32)
-        {
-            if ((HAL_Get_backup(RTC_BAKCUP_OTA_FORCE_MODE) == DFU_FORCE_MODE_REBOOT_TO_PACKAGE_OTA_MANAGER) ||
-                    (info.magic == SEC_CONFIG_MAGIC) && (info.install_state == DFU_PACKAGE_INSTALL))
-            {
-                sec_config_cache.running_imgs[CORE_HCPU] = (struct image_header_enc *) & (((struct sec_configuration *)FLASH_TABLE_START_ADDR)->imgs[DFU_FLASH_IMG_IDX(DFU_FLASH_IMG_LCPU)]);
-            }
-        }
-
-        if (sec_config_cache.running_imgs[CORE_HCPU] != (struct image_header_enc *)FLASH_UNINIT_32)
-        {
-            int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_HCPU] - g_config_addr - 0x1000) / sizeof(struct image_header_enc) + DFU_FLASH_IMG_LCPU;
-            board_init_psram();
-            dfu_boot_img_in_flash(flash_id);
-
-        }
-#endif
+        int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_BL]
+                        - g_config_addr - 0x1000)
+                       / sizeof(struct image_header_enc)
+                       + DFU_FLASH_IMG_LCPU;
+        dfu_boot_img_in_flash(flash_id);
     }
+#else
+    uint32_t active = HAL_Get_backup(BOOT_ACTIVE_IDX);
+    uint32_t trial  = HAL_Get_backup(BOOT_TRY_IDX);
+    int first_is_b;
+
+    if (trial == BOOT_TRY_B)
+    {
+        HAL_Set_backup(BOOT_TRY_IDX, 0);
+        HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_B);
+        first_is_b = 1;
+    }
+    else if (trial == BOOT_TRY_A)
+    {
+        HAL_Set_backup(BOOT_TRY_IDX, 0);
+        HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_A);
+        first_is_b = 0;
+    }
+    else
+    {
+        if (active == BOOT_ACTIVE_B)
+            first_is_b = 1;
+        else if (active == BOOT_ACTIVE_A)
+            first_is_b = 0;
+        else
+            first_is_b = get_cold_boot_slot();
+    }
+
+    board_init_psram();
+
+    try_boot_from_slot(first_is_b);
+
+    HAL_Set_backup(BOOT_COMMIT_IDX, 0);
+    try_boot_from_slot(!first_is_b);
+#endif
 }
 
 void hw_preinit0(void)

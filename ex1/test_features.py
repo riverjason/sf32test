@@ -2,7 +2,7 @@ import serial
 import time
 import sys
 
-s = serial.Serial('COM8', 1000000, timeout=1)
+s = serial.Serial('COM6', 1000000, timeout=1)
 
 def send_cmd(cmd, wait=1.5):
     s.reset_input_buffer()

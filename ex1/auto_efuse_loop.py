@@ -102,7 +102,7 @@ def serial_efuse_test(port: str, boot_wait: float, py_exe: str, gate: str) -> bo
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Loop build/flash/eFuse test until PASS")
-    ap.add_argument("--port", default=os.environ.get("COM_PORT", "COM8"))
+    ap.add_argument("--port", default=os.environ.get("COM_PORT", "COM6"))
     ap.add_argument("--rounds", type=int, default=8, help="Max build+flash+test cycles")
     ap.add_argument("--boot-wait", type=float, default=5.0)
     ap.add_argument(

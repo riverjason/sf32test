@@ -70,8 +70,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="RT-Thread msh serial automation")
     ap.add_argument(
         "--port",
-        default=os.environ.get("COM_PORT", "COM8"),
-        help="Serial port (default: COM8 or env COM_PORT)",
+        default=os.environ.get("COM_PORT", "COM6"),
+        help="Serial port (default: COM6 or env COM_PORT)",
     )
     ap.add_argument("--baud", type=int, default=1_000_000, help="Baud rate (default 1M)")
     ap.add_argument(

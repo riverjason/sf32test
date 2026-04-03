@@ -6,6 +6,7 @@
 #ifdef PKG_SIFLI_MBEDTLS_BOOT
     #include "mbedtls/cipher.h"
     #include "mbedtls/pk.h"
+    #include "mbedtls/sha256.h"
 #endif
 #include "secboot.h"
 
@@ -78,11 +79,8 @@ int sifli_img_sig_hash_verify(uint8_t *img_hash_sig, uint8_t *sig_pub_key, uint8
     uint8_t img_hash[32] = {0};
     mbedtls_pk_context pk;
 
-    /*1.calculate image hash*/
-    if (sifli_hash_calculate(image, img_size, img_hash, HASH_ALGO_SHA256))
-        return -1;
+    mbedtls_sha256(image, img_size, img_hash, 0);
 
-    /*2.verify image hash digital signature*/
     mbedtls_pk_init(&pk);
     if (mbedtls_pk_parse_public_key(&pk, sig_pub_key, DFU_SIG_KEY_SIZE))
         return -1;

@@ -1,6 +1,9 @@
 @echo off
 setlocal
-if not defined COM_PORT set COM_PORT=COM8
+if not defined COM_PORT set COM_PORT=COM6
+
+call "%~dp0set_paths.bat"
+set "PY=%PYTHON_VENV%\python.exe"
 
 call "%~dp0build_and_flash.bat"
 if errorlevel 1 exit /b 1
@@ -9,8 +12,6 @@ echo.
 echo [%time%] ---- Step 3/3: Serial eFuse check (%COM_PORT%) ----
 ping -n 3 127.0.0.1 >nul
 
-set "PYTHON_VENV=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts"
-set "PY=%PYTHON_VENV%\python.exe"
 if not exist "%PY%" set "PY=python"
 
 "%PY%" -c "import serial" 2>nul

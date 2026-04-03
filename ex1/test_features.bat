@@ -1,10 +1,11 @@
 @echo off
-set PYTHON=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
+call "%~dp0set_paths.bat"
+set "PYTHON=%PYTHON_VENV%\python.exe"
 
-%PYTHON% -c "
-import serial, time, sys
-
-s = serial.Serial('COM8', 1000000, timeout=1)
+"%PYTHON%" -c "
+import os, serial, time, sys
+port = os.environ.get('COM_PORT', 'COM6')
+s = serial.Serial(port, 1000000, timeout=1)
 
 def send_cmd(cmd, wait=1.5):
     s.reset_input_buffer()
@@ -17,13 +18,8 @@ def send_cmd(cmd, wait=1.5):
     print()
     return text
 
-# List threads to see breathing LED thread
 send_cmd('list_thread')
-
-# Check BLE status
 send_cmd('cmd_ble status')
-
-# Show our custom commands
 send_cmd('cmd_uart_download')
 
 s.close()

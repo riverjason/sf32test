@@ -18,6 +18,7 @@ AddBootLoader(SIFLI_SDK,rtconfig.CHIP)
 
 # Set default compile options
 SifliEnv()
+rtconfig.LFLAGS.append('-Wl,--allow-multiple-definition')
 
 TARGET = rtconfig.OUTPUT_DIR + rtconfig.TARGET_NAME + '.' + rtconfig.TARGET_EXT
 # Prepare building environment

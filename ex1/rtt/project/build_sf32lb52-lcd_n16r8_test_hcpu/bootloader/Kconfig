@@ -1,4 +1,5 @@
 source "$SIFLI_SDK/Kconfig.v2"
 source "$SIFLI_SDK/customer/boards/Kconfig.v2"
-source "e:/study/sf32/SiFli-SDK/customer/boards/sf32lb52-lcd_n16r8_test/hcpu/Kconfig.board"
-source "e:/study/sf32/SiFli-SDK/example/boot_loader/project/butterflmicro/ram_v2/Kconfig.proj"
+source "d:/dev/sf32/efuse1/SiFli-SDK/customer/boards/sf32lb52-lcd_n16r8_test/hcpu/Kconfig.board"
+osource "d:/dev/sf32/efuse1/SiFli-SDK/example/boot_loader/project/butterflmicro/ram_v2/sf-pkgs/Kconfig.conandeps"
+source "d:/dev/sf32/efuse1/SiFli-SDK/example/boot_loader/project/butterflmicro/ram_v2/Kconfig.proj"

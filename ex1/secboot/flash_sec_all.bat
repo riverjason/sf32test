@@ -1,11 +1,9 @@
 @echo off
-setlocal enabledelayedexpansion
-
-set ROOT_DIR=e:\study\sf32\ex1
-set BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu
-set SEC_OUT_DIR=%ROOT_DIR%\secboot\out
-set SFTOOL=C:\Users\jason\.sifli\tools\sftool\0.1.16\sftool.exe
-set COM_PORT=COM8
+call "%~dp0..\set_paths.bat"
+set "ROOT_DIR=%EX1_ROOT%"
+set "BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu"
+set "SEC_OUT_DIR=%ROOT_DIR%\secboot\out"
+if not defined COM_PORT set COM_PORT=COM6
 
 echo ============================================
 echo   Flash Secure Boot Images (SF32LB52)
@@ -36,14 +34,13 @@ echo   image_sec  : %SEC_OUT_DIR%\image_sec.bin @ 0x12020000
 echo   ftab_sec   : %SEC_OUT_DIR%\ftab_sec.bin  @ 0x12000000
 echo.
 
-%SFTOOL% -p %COM_PORT% -c SF32LB52 -m nor --before no_reset --after soft_reset --connect-attempts 10 write_flash --verify %BUILD_DIR%\bootloader\bootloader.bin@0x12010000 %SEC_OUT_DIR%\image_sec.bin@0x12020000 %SEC_OUT_DIR%\ftab_sec.bin@0x12000000
+"%SFTOOL%" -p %COM_PORT% -c SF32LB52 -m nor --before no_reset --after soft_reset --connect-attempts 10 write_flash --verify %BUILD_DIR%\bootloader\bootloader.bin@0x12010000 %SEC_OUT_DIR%\image_sec.bin@0x12020000 %SEC_OUT_DIR%\ftab_sec.bin@0x12000000
 
-set FLASH_EXIT=!ERRORLEVEL!
+set FLASH_EXIT=%ERRORLEVEL%
 echo.
-if !FLASH_EXIT! EQU 0 (
+if %FLASH_EXIT% EQU 0 (
     echo [OK] Secure flash succeeded.
 ) else (
-    echo [FAIL] Flash failed with exit code !FLASH_EXIT!
+    echo [FAIL] Flash failed with exit code %FLASH_EXIT%
 )
-endlocal
-exit /b !FLASH_EXIT!
+exit /b %FLASH_EXIT%

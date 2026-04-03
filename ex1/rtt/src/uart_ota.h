@@ -1,13 +1,13 @@
 /*
- * UART OTA: 应用运行时向 Slot B 写入固件镜像（A/B 物理分区）。
+ * UART OTA: A/B 安全升级，应用运行时向非活跃 Slot 写入固件镜像。
  *
- * Flash 布局（与板级 ptab 中 main 区 0x12020000、长度 0x00700000 对齐）:
- *   Slot A (运行中): 0x12020000, 3.5MiB (0x00380000) — 链接器须限制 APP 不超过此大小
- *   Slot B (升级槽): 0x123A0000, 3.5MiB — UART OTA 写入目标
- *   其后: 0x12720000 起为原厂 DFU 等分区，不可覆盖
- *
- * 注意: 从 A 区 XIP 运行时无法安全自擦写 A 区。验证 B 区成功后，可用官方 sftool
- * 在下载模式下将已保存的 main.bin 写回 0x12020000，或自行扩展引导从 B 启动。
+ * Flash 布局 (ptab):
+ *   0x12000000  32KB   ftab_A (FLASH_TABLE)
+ *   0x12008000  32KB   ftab_B (gap before bootloader)
+ *   0x12010000  64KB   Bootloader
+ *   0x12020000  4MB    Slot A (HCPU_FLASH_CODE, XIP)
+ *   0x12420000  4MB    Slot B
+ *   0x12820000         DFU / KVDB / FS ...
  */
 #ifndef UART_OTA_H
 #define UART_OTA_H
@@ -16,12 +16,27 @@
 #include <rtdef.h>
 
 #define UART_OTA_SLOT_A_BASE    0x12020000UL
-#define UART_OTA_SLOT_B_BASE    0x123A0000UL
-#define UART_OTA_SLOT_SIZE      0x00380000UL /* 3.5 MiB per bank */
+#define UART_OTA_SLOT_B_BASE    0x12420000UL
+#define UART_OTA_SLOT_SIZE      0x00400000UL /* 4 MiB per bank */
 #define UART_OTA_META_SECTOR    0x00001000UL /* B 区最后 4KB 存元数据，镜像最大 = SLOT_SIZE - META */
 #define UART_OTA_MAX_IMAGE_SIZE (UART_OTA_SLOT_SIZE - UART_OTA_META_SECTOR)
 
 #define UART_OTA_MAGIC_META     0x314F545AU /* "OT4" little */
+
+#define UART_OTA_FTAB_A_BASE    0x12000000UL
+#define UART_OTA_FTAB_B_BASE    0x12008000UL
+#define UART_OTA_FTAB_SIZE      0x00008000UL /* 32 KiB per ftab */
+
+#define UART_OTA_AB_PERSIST_MAGIC  0x41425053UL /* "ABPS" */
+#define UART_OTA_AB_PERSIST_ADDR   0x12880000UL /* DFU_DOWNLOAD_REGION 首部，独立于 ftab/image */
+
+#pragma pack(push, 1)
+struct ab_persist
+{
+    uint32_t magic;
+    uint32_t active_slot;   /* 0 = Slot A, 1 = Slot B */
+};
+#pragma pack(pop)
 
 /*
  * A/B boot state in RTC backup registers.

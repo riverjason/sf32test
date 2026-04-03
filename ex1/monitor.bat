@@ -1,10 +1,11 @@
 @echo off
-set PYTHON=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
-set MINITERM=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\pyserial-ports.exe
+call "%~dp0set_paths.bat"
+set "PYTHON=%PYTHON_VENV%\python.exe"
+set "MINITERM=%PYTHON_VENV%\pyserial-ports.exe"
 
 echo === Available COM ports ===
-%MINITERM%
+"%MINITERM%"
 echo.
 
-echo === Reading serial output from COM8 for 10 seconds ===
-%PYTHON% E:\study\sf32\ex1\serial_monitor.py COM8 1000000
+echo === Reading serial output from %COM_PORT% for 10 seconds ===
+"%PYTHON%" "%EX1_ROOT%\serial_monitor.py" %COM_PORT% 1000000

@@ -5,11 +5,13 @@ src   = []
 CPPPATH = []
 cwd   = GetCurrentDir()
 
-src = ['efuse.c', "secboot.c"]
+CPPPATH += [cwd]
 
-CPPPATH += [cwd]    
+if GetDepend('CFG_BOOTLOADER'):
+    src = []
+else:
+    src = ['efuse.c', "secboot.c"]
 
-# add src and include to group.
 group = DefineGroup('boot', src, depend = ["USING_SECBOOT"],CPPPATH = CPPPATH)
     
 Return('group')

@@ -1,5 +1,6 @@
 @echo off
-set PYTHON=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
+call "%~dp0set_paths.bat"
+set "PYTHON=%PYTHON_VENV%\python.exe"
 
 echo === Detailed COM port information ===
-%PYTHON% -c "import serial.tools.list_ports;[print(f'{p.device}: {p.description} [hwid={p.hwid}]') for p in serial.tools.list_ports.comports()]"
+"%PYTHON%" -c "import serial.tools.list_ports;[print(f'{p.device}: {p.description} [hwid={p.hwid}]') for p in serial.tools.list_ports.comports()]"

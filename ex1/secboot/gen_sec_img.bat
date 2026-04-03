@@ -1,12 +1,12 @@
 @echo off
 setlocal
 
-set ROOT_DIR=e:\study\sf32\ex1
-set BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu
-set SEC_TOOL_DIR=e:\study\sf32\SiFli-SDK\tools\secureboot
-set KEY_DIR=%ROOT_DIR%\secboot\keys
-set OUT_DIR=%ROOT_DIR%\secboot\out
-set PY_EXE=C:\Users\jason\.sifli\python_env\sifli-sdk2.4_py3.12_env\Scripts\python.exe
+call "%~dp0..\set_paths.bat"
+set "ROOT_DIR=%EX1_ROOT%"
+set "BUILD_DIR=%ROOT_DIR%\rtt\project\build_sf32lb52-lcd_n16r8_test_hcpu"
+set "KEY_DIR=%ROOT_DIR%\secboot\keys"
+set "OUT_DIR=%ROOT_DIR%\secboot\out"
+set "PY_EXE=%PYTHON_VENV%\python.exe"
 
 echo ============================================
 echo   Generate Secure Image + Secure FTAB
@@ -58,10 +58,17 @@ if errorlevel 1 (
 copy /y "enc_ftab.bin" "ftab_sec.bin" >nul
 popd
 
-echo [2/2] Strip 296-byte header from image_sec.bin (header is in ftab) ...
+echo [2/3] Strip 296-byte header from image_sec.bin (header is in ftab) ...
 "%PY_EXE%" -c "d=open(r'%OUT_DIR%\image_sec.bin','rb').read(); open(r'%OUT_DIR%\image_sec.bin','wb').write(d[296:])"
 if errorlevel 1 (
     echo [FAIL] header strip failed.
+    exit /b 1
+)
+
+echo [3/3] Pack single OTA package (ota_pkg.bin) ...
+"%PY_EXE%" -c "import struct,pathlib; f=pathlib.Path(r'%OUT_DIR%\ftab_sec.bin').read_bytes(); i=pathlib.Path(r'%OUT_DIR%\image_sec.bin').read_bytes(); pathlib.Path(r'%OUT_DIR%\ota_pkg.bin').write_bytes(struct.pack('<4sIII',b'SFOT',1,len(f),len(i))+f+i)"
+if errorlevel 1 (
+    echo [FAIL] OTA package failed.
     exit /b 1
 )
 
@@ -69,5 +76,6 @@ echo.
 echo [OK] Generated:
 echo   %OUT_DIR%\image_sec.bin (encrypted data only, no header)
 echo   %OUT_DIR%\ftab_sec.bin  (contains keys + image header + signature)
+echo   %OUT_DIR%\ota_pkg.bin   (single OTA package for upgrade tool)
 echo.
 endlocal

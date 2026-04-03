@@ -1,0 +1,7 @@
+=== eFuse Known Fields ===
+  (bank = bit_offset / 256;  each bank = 256 bits = 32 bytes)
+UID         (bank 0, bit   0, 16 bytes): 20455B4F7CF47CE3000008020C286400
+SIG_HASH    (bank 0, bit 128,  8 bytes): 7D1C8103929F1D09
+SECURE_FLAG (bank 0, bit 192,  4 bytes): 00000000  => secure_enabled = 0x00
+ROOT_KEY    (bank 3, bit 768, 32 bytes): 6593D651012A435505F9A61B500BED6E9644DC9DACCF622BFAA4089FAA713A77
+            (note: if all zeros and ROOT_KEY was written, hardware may block reads after SECURE_FLAG is set.)

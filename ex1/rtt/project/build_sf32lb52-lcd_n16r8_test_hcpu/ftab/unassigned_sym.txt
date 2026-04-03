@@ -1,1 +1,1 @@
-RT_USING_MTD_NOR (defined at e:/study/sf32/SiFli-SDK//rtos/rtthread/components/drivers/Kconfig:122) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BSP_USING_RTTHREAD (=n). 
+RT_USING_MTD_NOR (defined at d:\dev\sf32\efuse1\SiFli-SDK\/rtos/rtthread/components/drivers/Kconfig:122) was assigned the value 'y' but got the value 'n'. Check these unsatisfied dependencies: BSP_USING_RTTHREAD (=n). 
