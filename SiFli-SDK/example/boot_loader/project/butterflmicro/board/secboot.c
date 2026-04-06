@@ -74,19 +74,68 @@ int sifli_sigkey_pub_verify(uint8_t *sigkey, uint32_t key_size)
 }
 
 #ifdef PKG_SIFLI_MBEDTLS_BOOT
+static void dbg_sig_hex(const char *tag, const uint8_t *buf, int len)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    char tmp[80];
+    int p = 0;
+    while (*tag && p < 60) tmp[p++] = *tag++;
+    for (int i = 0; i < len && p < 76; i++) {
+        tmp[p++] = hx[buf[i] >> 4];
+        tmp[p++] = hx[buf[i] & 0xF];
+    }
+    tmp[p++] = '\r'; tmp[p++] = '\n';
+    boot_uart_tx((void *)hwp_usart1, (uint8_t *)tmp, p);
+}
+
 int sifli_img_sig_hash_verify(uint8_t *img_hash_sig, uint8_t *sig_pub_key, uint8_t *image, uint32_t img_size)
 {
     uint8_t img_hash[32] = {0};
     mbedtls_pk_context pk;
+    int rc;
+
+    {
+        static const char hx[] = "0123456789ABCDEF";
+        char lbuf[20];
+        int lp = 0;
+        lbuf[lp++]='L'; lbuf[lp++]='N'; lbuf[lp++]='=';
+        for (int s = 28; s >= 0; s -= 4)
+            lbuf[lp++] = hx[(img_size >> s) & 0xF];
+        lbuf[lp++] = '\r'; lbuf[lp++] = '\n';
+        boot_uart_tx((void *)hwp_usart1, (uint8_t *)lbuf, lp);
+    }
 
     mbedtls_sha256(image, img_size, img_hash, 0);
+    dbg_sig_hex("SH:", img_hash, 16);
 
     mbedtls_pk_init(&pk);
-    if (mbedtls_pk_parse_public_key(&pk, sig_pub_key, DFU_SIG_KEY_SIZE))
+    rc = mbedtls_pk_parse_public_key(&pk, sig_pub_key, DFU_SIG_KEY_SIZE);
+    if (rc) {
+        static const char hx[] = "0123456789ABCDEF";
+        char ebuf[16];
+        int ep = 0;
+        uint32_t urc = (uint32_t)(-rc);
+        ebuf[ep++]='E'; ebuf[ep++]='1'; ebuf[ep++]='=';
+        for (int s = 12; s >= 0; s -= 4)
+            ebuf[ep++] = hx[(urc >> s) & 0xF];
+        ebuf[ep++] = '\r'; ebuf[ep++] = '\n';
+        boot_uart_tx((void *)hwp_usart1, (uint8_t *)ebuf, ep);
         return -1;
+    }
     mbedtls_rsa_set_padding((mbedtls_rsa_context *)pk.pk_ctx, MBEDTLS_RSA_PKCS_V15, MBEDTLS_MD_SHA256);
-    if (mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, img_hash, DFU_IMG_HASH_SIZE, img_hash_sig, DFU_SIG_SIZE))
+    rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, img_hash, DFU_IMG_HASH_SIZE, img_hash_sig, DFU_SIG_SIZE);
+    if (rc) {
+        static const char hx[] = "0123456789ABCDEF";
+        char ebuf[16];
+        int ep = 0;
+        uint32_t urc = (uint32_t)(-rc);
+        ebuf[ep++]='E'; ebuf[ep++]='2'; ebuf[ep++]='=';
+        for (int s = 12; s >= 0; s -= 4)
+            ebuf[ep++] = hx[(urc >> s) & 0xF];
+        ebuf[ep++] = '\r'; ebuf[ep++] = '\n';
+        boot_uart_tx((void *)hwp_usart1, (uint8_t *)ebuf, ep);
         return -1;
+    }
 
     return 0;
 }

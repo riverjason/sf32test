@@ -26,13 +26,12 @@
 #define FTAB_B_ADDR     0x12008000UL
 
 #define AB_PERSIST_MAGIC    0x41425053UL /* "ABPS" */
+#define AB_PERSIST_ADDR     0x12880000UL
 
 static int get_cold_boot_slot(void)
 {
     struct { uint32_t magic; uint32_t active; } m;
-    if (DFU_DOWNLOAD_REGION_START_ADDR == FLASH_UNINIT_32)
-        return 0;
-    g_flash_read(DFU_DOWNLOAD_REGION_START_ADDR, (const int8_t *)&m, sizeof(m));
+    g_flash_read(AB_PERSIST_ADDR, (const int8_t *)&m, sizeof(m));
     if (m.magic == AB_PERSIST_MAGIC && m.active == 1)
         return 1;
     return 0;
@@ -134,6 +133,7 @@ static int try_boot_from_slot(int slot_is_b)
     dfu_boot_img_in_flash(flash_id);
 
     HAL_FLASH_AES_CFG(boot_handle, 0);
+    SCB_CleanInvalidateDCache();
     return -1;
 }
 
@@ -217,6 +217,7 @@ void dfu_boot_img_in_flash(int flashid)
                     if (is_flash)
                         HAL_FLASH_ALIAS_CFG(boot_handle, dest, img_hdr->length, src - dest);
                     HAL_FLASH_AES_CFG(boot_handle, 1);
+                    SCB_CleanInvalidateDCache();
                 }
                 else
                 {
@@ -224,6 +225,39 @@ void dfu_boot_img_in_flash(int flashid)
                     sifli_hw_dec_key(dfu_key, dfu_key1, sizeof(dfu_key1));
                     g_flash_read(src, (const int8_t *)dest, img_hdr->length);
                     sifli_hw_dec(dfu_key1, (uint8_t *)dest, (uint8_t *)dest, img_hdr->length, 0);
+                }
+                {
+                    static const char hx[] = "0123456789ABCDEF";
+                    char dbuf[60];
+                    int dp;
+                    uint8_t *dd = (uint8_t *)dest;
+                    uint32_t dlen = img_hdr->length;
+
+                    dp = 0;
+                    dbuf[dp++]='D'; dbuf[dp++]='@';
+                    for (int s=28;s>=0;s-=4) dbuf[dp++]=hx[(dest>>s)&0xF];
+                    dbuf[dp++]=' '; dbuf[dp++]='S'; dbuf[dp++]='@';
+                    for (int s=28;s>=0;s-=4) dbuf[dp++]=hx[(src>>s)&0xF];
+                    dbuf[dp++]='\r'; dbuf[dp++]='\n';
+                    boot_uart_tx((void*)hwp_usart1,(uint8_t*)dbuf,dp);
+
+                    dp = 0;
+                    dbuf[dp++]='B'; dbuf[dp++]='0'; dbuf[dp++]=':';
+                    for (int i=0;i<16;i++){dbuf[dp++]=hx[dd[i]>>4];dbuf[dp++]=hx[dd[i]&0xF];}
+                    dbuf[dp++]='\r'; dbuf[dp++]='\n';
+                    boot_uart_tx((void*)hwp_usart1,(uint8_t*)dbuf,dp);
+
+                    dp = 0;
+                    dbuf[dp++]='B'; dbuf[dp++]='5'; dbuf[dp++]=':';
+                    for (int i=0;i<16;i++){dbuf[dp++]=hx[dd[512+i]>>4];dbuf[dp++]=hx[dd[512+i]&0xF];}
+                    dbuf[dp++]='\r'; dbuf[dp++]='\n';
+                    boot_uart_tx((void*)hwp_usart1,(uint8_t*)dbuf,dp);
+
+                    dp = 0;
+                    dbuf[dp++]='B'; dbuf[dp++]='E'; dbuf[dp++]=':';
+                    for (int i=0;i<16;i++){dbuf[dp++]=hx[dd[dlen-16+i]>>4];dbuf[dp++]=hx[dd[dlen-16+i]&0xF];}
+                    dbuf[dp++]='\r'; dbuf[dp++]='\n';
+                    boot_uart_tx((void*)hwp_usart1,(uint8_t*)dbuf,dp);
                 }
                 if (secboot_verify_before_run(dest, img_hdr) == 0)
                     run_img(dest);

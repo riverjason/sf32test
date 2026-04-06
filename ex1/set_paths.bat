@@ -16,5 +16,5 @@ if not defined RTT_EXEC_PATH set "RTT_EXEC_PATH=%SIFLI_HOME%\tools\arm-none-eabi
 if not defined SFTOOL set "SFTOOL=%SIFLI_HOME%\tools\sftool\0.1.16\sftool.exe"
 
 rem Default UART; override anytime: set COM_PORT=COM9
-if not defined COM_PORT set "COM_PORT=COM6"
+if not defined COM_PORT set "COM_PORT=COM8"
 set "BOARD_DEFAULT=sf32lb52-lcd_n16r8_test"

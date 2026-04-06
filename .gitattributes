@@ -1,0 +1,33 @@
+# Normalize line endings: commit as LF, checkout as native
+* text=auto
+
+# Source files
+*.c text
+*.h text
+*.py text
+*.bat text eol=crlf
+*.sh text eol=lf
+*.md text
+*.json text
+*.cfg text
+
+# Linker scripts
+*.lds text
+*.sct text
+
+# Binary files - never normalize
+*.o binary
+*.elf binary
+*.bin binary
+*.hex binary
+*.map binary
+*.a binary
+*.lib binary
+*.dblite binary
+*.pyc binary
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.der binary
+*.pem binary

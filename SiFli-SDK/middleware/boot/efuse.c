@@ -159,35 +159,35 @@ int sifli_hw_dec(uint8_t *key, uint8_t *in_data, uint8_t *out_data, int size, ui
 
 void sifli_hw_init_xip_key(uint8_t *enc_img_key)
 {
-    uint8_t *uid;
-
-    /* enable dedicated mode for image key decryption */
+    static uint8_t cbc_iv[DFU_IV_LEN];
     static uint32_t plain_key[DFU_KEY_SIZE >> 2];
 
+    sifli_hw_efuse_read(EFUSE_ID_SIG_HASH, cbc_iv, DFU_SIG_HASH_SIZE);
+    memset(&cbc_iv[DFU_SIG_HASH_SIZE], 0, DFU_IV_LEN - DFU_SIG_HASH_SIZE);
+
     __HAL_SYSCFG_SET_SECURITY();
-    uid = &g_uid[0];
-    sifli_hw_efuse_read(EFUSE_UID, uid, DFU_UID_SIZE);
-    memset(plain_key, 0, sizeof(plain_key));
-    HAL_AES_init(NULL, DFU_KEY_SIZE, (uint32_t *)uid, AES_MODE_CBC);
+    HAL_AES_init(NULL, DFU_KEY_SIZE, (uint32_t *)cbc_iv, AES_MODE_CBC);
     HAL_AES_run(AES_DEC, enc_img_key, (uint8_t *)plain_key, DFU_KEY_SIZE);
-    /* restore to normal mode */
     __HAL_SYSCFG_CLEAR_SECURITY();
 }
 
 int sifli_hw_dec_key(uint8_t *in_data, uint8_t *out_data, int size)
 {
-    uint8_t *uid;
-    uint8_t *key = NULL;
+    static uint8_t cbc_iv[DFU_IV_LEN];
+    static uint8_t root_key[DFU_KEY_SIZE];
 
     if (size != DFU_KEY_SIZE)
     {
         return -1;
     }
 
-    uid = &g_uid[0];
-    sifli_hw_efuse_read(EFUSE_UID, uid, DFU_UID_SIZE);
-    HAL_AES_init((uint32_t *)key, DFU_KEY_SIZE, (uint32_t *)uid, AES_MODE_CBC);
+    sifli_hw_efuse_read(EFUSE_ID_SIG_HASH, cbc_iv, DFU_SIG_HASH_SIZE);
+    memset(&cbc_iv[DFU_SIG_HASH_SIZE], 0, DFU_IV_LEN - DFU_SIG_HASH_SIZE);
+
+    sifli_hw_efuse_read(EFUSE_ID_ROOT, root_key, DFU_KEY_SIZE);
+    HAL_AES_init((uint32_t *)root_key, DFU_KEY_SIZE, (uint32_t *)cbc_iv, AES_MODE_CBC);
     HAL_AES_run(AES_DEC, in_data, out_data, DFU_KEY_SIZE);
+    memset(root_key, 0, sizeof(root_key));
 
     return 0;
 }

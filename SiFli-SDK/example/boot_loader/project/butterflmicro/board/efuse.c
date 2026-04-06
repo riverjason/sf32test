@@ -64,33 +64,70 @@ int sifli_hw_efuse_read(uint8_t id, uint8_t *data, int size)
 
 }
 
+extern void boot_uart_tx(void *handle, uint8_t *data, uint16_t len);
+
+static void dbg_msg(const char *s)
+{
+    int len = 0;
+    while (s[len]) len++;
+    boot_uart_tx((void *)hwp_usart1, (uint8_t *)s, len);
+}
+
 void sifli_hw_init_xip_key(uint8_t *enc_img_key)
 {
-    uint8_t *uid;
-
-    /* enable dedicated mode for image key decryption */
+    static uint8_t cbc_iv[DFU_IV_LEN];
     static uint32_t plain_key[DFU_KEY_SIZE >> 2];
+    ALIGN(4)
+    static uint8_t root_key_buf[DFU_KEY_SIZE];
+    ALIGN(4)
+    static uint8_t uid_iv[DFU_IV_LEN];
+    ALIGN(4)
+    static uint8_t re_enc[DFU_KEY_SIZE];
 
-    __HAL_SYSCFG_SET_SECURITY();
-    uid = &g_uid[0];
-    sifli_hw_efuse_read(EFUSE_UID, uid, DFU_UID_SIZE);
-    memset(plain_key, 0, sizeof(plain_key));
-    HAL_AES_init(NULL, DFU_KEY_SIZE, (uint32_t *)uid, AES_MODE_CBC);
+    /* Step 1: software AES-CBC decrypt session key with SIG_HASH IV */
+    sifli_hw_efuse_read(EFUSE_ID_SIG_HASH, cbc_iv, DFU_SIG_HASH_SIZE);
+    memset(&cbc_iv[DFU_SIG_HASH_SIZE], 0, DFU_IV_LEN - DFU_SIG_HASH_SIZE);
+
+    sifli_hw_efuse_read(EFUSE_ID_ROOT, root_key_buf, DFU_KEY_SIZE);
+    HAL_AES_init((uint32_t *)root_key_buf, DFU_KEY_SIZE, (uint32_t *)cbc_iv, AES_MODE_CBC);
     HAL_AES_run(AES_DEC, enc_img_key, (uint8_t *)plain_key, DFU_KEY_SIZE);
-    /* restore to normal mode */
+
+    /* Step 2: re-encrypt session key with UID IV so FKEY_MODE can consume it */
+    sifli_hw_efuse_read(EFUSE_UID, uid_iv, DFU_UID_SIZE);
+    HAL_AES_init((uint32_t *)root_key_buf, DFU_KEY_SIZE, (uint32_t *)uid_iv, AES_MODE_CBC);
+    HAL_AES_run(AES_ENC, (uint8_t *)plain_key, re_enc, DFU_KEY_SIZE);
+
+    memset(root_key_buf, 0, sizeof(root_key_buf));
+    memset(plain_key, 0, sizeof(plain_key));
+
+    /* Step 3: FKEY_MODE decrypt (KEY_SEL uses HW root key + UID IV) → loads flash key */
+    __HAL_SYSCFG_SET_SECURITY();
+    HAL_AES_init(NULL, DFU_KEY_SIZE, (uint32_t *)uid_iv, AES_MODE_CBC);
+    HAL_AES_run(AES_DEC, re_enc, (uint8_t *)plain_key, DFU_KEY_SIZE);
     __HAL_SYSCFG_CLEAR_SECURITY();
+
+    memset(re_enc, 0, sizeof(re_enc));
+
+    if (hwp_aes_acc->STATUS & AES_ACC_STATUS_FLASH_KEY_VALID)
+        dbg_msg("FK=1\r\n");
+    else
+        dbg_msg("FK=0\r\n");
 }
 
 
 int sifli_hw_dec_key(uint8_t *in_data, uint8_t *out_data, int size)
 {
-    uint8_t *uid;
-    uint8_t *key = NULL;
+    static uint8_t cbc_iv[DFU_IV_LEN];
+    ALIGN(4)
+    static uint8_t root_key[DFU_KEY_SIZE];
 
-    uid = &g_uid[0];
-    sifli_hw_efuse_read(EFUSE_UID, uid, DFU_UID_SIZE);
-    HAL_AES_init((uint32_t *)key, DFU_KEY_SIZE, (uint32_t *)uid, AES_MODE_CBC);
+    sifli_hw_efuse_read(EFUSE_ID_SIG_HASH, cbc_iv, DFU_SIG_HASH_SIZE);
+    memset(&cbc_iv[DFU_SIG_HASH_SIZE], 0, DFU_IV_LEN - DFU_SIG_HASH_SIZE);
+
+    sifli_hw_efuse_read(EFUSE_ID_ROOT, root_key, DFU_KEY_SIZE);
+    HAL_AES_init((uint32_t *)root_key, DFU_KEY_SIZE, (uint32_t *)cbc_iv, AES_MODE_CBC);
     HAL_AES_run(AES_DEC, in_data, out_data, DFU_KEY_SIZE);
+    memset(root_key, 0, sizeof(root_key));
 
     return 0;
 }
@@ -125,6 +162,5 @@ uint8_t *dfu_get_counter(uint32_t offset)
     }
     return g_aes_ctr_iv;
 }
-
 
 

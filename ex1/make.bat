@@ -37,7 +37,6 @@ set DO_FLASH=0
 set DO_PLAIN=0
 set DO_CLEAN=0
 set DO_HELP=0
-
 if "%~1"=="" (
     set DO_BUILD=1
     set DO_SIGN=1
@@ -99,10 +98,9 @@ echo    all     Same as: build sign flash
 echo    help    Show this help
 echo.
 echo  Combinations:
-echo    make                  = build + sign + flash  [default]
-echo    make build sign       = compile then generate secure images
-echo    make sign flash       = generate then flash, skip build
-echo    make build sign flash = same as 'make' or 'make all'
+echo    make                = build + sign + flash  [default]
+echo    make build sign     = compile then generate secure images
+echo    make sign flash     = generate then flash, skip build
 echo.
 echo  Environment:
 echo    COM_PORT  Serial port        [current: %COM_PORT%]
@@ -117,7 +115,7 @@ echo.
 exit /b 0
 
 :: ================================================================
-::  CLEAN
+::  CLEAN (note: UID is no longer used in the encryption pipeline)
 :: ================================================================
 :do_clean
 echo.
@@ -210,7 +208,6 @@ copy /y "%BUILD_DIR%\ftab\ftab.bin" "%OUT_DIR%\ftab.bin" >nul
 pushd "%OUT_DIR%"
 "%PY_EXE%" "%SEC_TOOL_DIR%\imgtool.py" enc_static ^
     --key="%KEY_DIR%\s01" ^
-    --uid="%KEY_DIR%\uid" ^
     --img="%BUILD_DIR%\main.bin" ^
     --eimg="%OUT_DIR%\image_sec.bin" ^
     --bksize=512 ^

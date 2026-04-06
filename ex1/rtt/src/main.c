@@ -537,7 +537,7 @@ MSH_CMD_EXPORT(cmd_ble, BLE control commands);
 
 int main(void)
 {
-    rt_kprintf("\n=================main v9.4 [SECBOOT] verify =========\n");
+    rt_kprintf("\n=================main v9.5 [SECBOOT] OTA-OK =========\n");
     rt_kprintf("\n========================================\n");
     rt_kprintf("  SF32LB52 Application (BLE + LED + DFU)\n");
     rt_kprintf("========================================\n\n");

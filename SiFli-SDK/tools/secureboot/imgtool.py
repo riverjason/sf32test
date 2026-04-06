@@ -134,13 +134,8 @@ def encrypt_image_help_static(img, eimg) :
     #print_hex(recipient_key)
     #print("\r")
     
-    uid=open(FLAGS.uid+".bin", "rb").read()
-    #print_hex(uid)
-    #print("\r")
     #1. Generate AES Key - Encrypt the data with the AES session key
     session_key = get_random_bytes(32)
-    #print_hex(session_key)
-    #print("\r")
     #2. Align image to 16 bytes 
     data=open(img,"rb").read()
     data=bytearray(data)
@@ -154,11 +149,14 @@ def encrypt_image_help_static(img, eimg) :
     img_len=to_bytes(len(data))
     # 3. Generate Header
     
-    cnt_prefix=open(FLAGS.sigkey+"_hash.bin", "rb").read(8)
+    sig_hash_full=open(FLAGS.sigkey+"_hash.bin", "rb").read()
+    cnt_prefix=sig_hash_full[:8]
     cnt_prefix+=b'\x00'*4
 
-    #2.1 encrypt session key with AES-CBC(ROOT_KEY, UID_IV) — matches sifli_hw_init_xip_key
-    cipher_core_aes = AES.new(recipient_key, AES.MODE_CBC, uid)
+    #2.1 encrypt session key with AES-CBC(ROOT_KEY, SIG_HASH_IV)
+    #    IV = SIG_HASH(8B) + 8 zero bytes, padded to 16B AES block
+    cbc_iv = sig_hash_full[:8] + b'\x00' * 8
+    cipher_core_aes = AES.new(recipient_key, AES.MODE_CBC, cbc_iv)
     enc_session = cipher_core_aes.encrypt(session_key)
 
     bksize=struct.pack("<H", FLAGS.bksize)
@@ -522,8 +520,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '--uid',
         type=str,
-        default='sifli01uid',
-        help='UID')
+        default='',
+        help='(deprecated, ignored) UID no longer used as IV')
         
     FLAGS, unparsed = parser.parse_known_args()
     if (FLAGS.action == 'uid'):

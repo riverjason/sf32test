@@ -1,0 +1,11 @@
+# Build outputs
+rtt/project/build_*/
+rtt/project/.sconsign.dblite
+rtt/project/__pycache__/
+rtt/project/*.o
+
+# Secure boot intermediate/output binaries
+secboot/out/
+
+# OTA tool bytecode
+ota_tool/__pycache__/

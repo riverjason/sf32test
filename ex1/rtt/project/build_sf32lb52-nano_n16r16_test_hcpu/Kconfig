@@ -1,4 +1,0 @@
-source "$SIFLI_SDK/Kconfig.v2"
-source "$SIFLI_SDK/customer/boards/Kconfig.v2"
-source "E:/study/sf32/SiFli-SDK/customer/boards/sf32lb52-nano_n16r16_test/hcpu/Kconfig.board"
-source "E:/study/sf32/ex1/rtt/project/Kconfig.proj"
