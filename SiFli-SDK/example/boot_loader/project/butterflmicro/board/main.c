@@ -26,13 +26,54 @@
 #define FTAB_B_ADDR     0x12008000UL
 
 #define AB_PERSIST_MAGIC    0x41425053UL /* "ABPS" */
-#define AB_PERSIST_ADDR     0x12880000UL
+#define AB_PERSIST_ADDR     0x1277F000UL /* keep in sync with uart_ota.h */
+#define AB_PERSIST_SECTOR   0x1000UL
+
+#pragma pack(push, 1)
+/* Must match ex1/rtt/src/uart_ota.h struct ab_persist */
+struct ab_persist_bl
+{
+    uint32_t magic;
+    uint32_t active_slot;
+    uint32_t pending_try;
+    uint32_t commit;
+};
+#pragma pack(pop)
+
+static uint32_t ab_persist_addr_runtime(void)
+{
+    uint32_t end;
+
+    if (boot_handle == NULL || boot_handle->isNand != 0)
+        return 0;
+    end = boot_handle->base + boot_handle->size;
+    if (AB_PERSIST_ADDR >= boot_handle->base && (AB_PERSIST_ADDR + sizeof(struct ab_persist_bl)) <= end)
+        return AB_PERSIST_ADDR;
+    if (end >= (boot_handle->base + AB_PERSIST_SECTOR))
+        return end - AB_PERSIST_SECTOR;
+    return 0;
+}
+
+static int bl_ab_persist_save(const struct ab_persist_bl *m)
+{
+    uint32_t addr = ab_persist_addr_runtime();
+    if (addr == 0)
+        return -1;
+    if (g_flash_erase(addr, AB_PERSIST_SECTOR) != 0)
+        return -1;
+    if (g_flash_write(addr, (const int8_t *)m, sizeof(*m)) != (int)sizeof(*m))
+        return -1;
+    return 0;
+}
 
 static int get_cold_boot_slot(void)
 {
-    struct { uint32_t magic; uint32_t active; } m;
-    g_flash_read(AB_PERSIST_ADDR, (const int8_t *)&m, sizeof(m));
-    if (m.magic == AB_PERSIST_MAGIC && m.active == 1)
+    struct ab_persist_bl m;
+    uint32_t addr = ab_persist_addr_runtime();
+    if (addr == 0)
+        return 0;
+    g_flash_read(addr, (const int8_t *)&m, sizeof(m));
+    if (m.magic == AB_PERSIST_MAGIC && m.active_slot == 1)
         return 1;
     return 0;
 }
@@ -87,16 +128,11 @@ void boot_test(void)
 
 /************************Boot *****************************************/
 
-/* A/B OTA boot policy */
+/* A/B OTA boot policy (Flash ab_persist @ AB_PERSIST_ADDR, no RTC BKP) */
 #define BOOT_SLOT_A_XIP     0x12020000UL
 #define BOOT_SLOT_B_PHYS    0x12420000UL
 #define BOOT_SLOT_SIZE      0x00400000UL
-#define BOOT_ACTIVE_IDX     9
-#define BOOT_TRY_IDX        8
-#define BOOT_COMMIT_IDX     7
 
-#define BOOT_ACTIVE_A       0x41435441UL /* "ACTA" */
-#define BOOT_ACTIVE_B       0x41435442UL /* "ACTB" */
 #define BOOT_TRY_A          0x54525941UL /* "TRYA" */
 #define BOOT_TRY_B          0x54525942UL /* "TRYB" */
 #define BOOT_COMMIT_A       0x434D5441UL /* "CMTA" */
@@ -113,15 +149,22 @@ void run_img(uint32_t dest)
 static int try_boot_from_slot(int slot_is_b)
 {
     uint32_t ftab_addr = slot_is_b ? FTAB_B_ADDR : FTAB_A_ADDR;
+    boot_uart_tx(hwp_usart1, (uint8_t *)(slot_is_b ? "TS:B\r\n" : "TS:A\r\n"), 6);
 
     g_flash_read(ftab_addr, (const int8_t *)&sec_config_cache,
                  sizeof(sec_config_cache));
     if (sec_config_cache.magic != SEC_CONFIG_MAGIC)
+    {
+        boot_uart_tx(hwp_usart1, (uint8_t *)"TS:M\r\n", 6);
         return -1;
+    }
 
     if (sec_config_cache.running_imgs[CORE_HCPU]
             == (struct image_header_enc *)FLASH_UNINIT_32)
+    {
+        boot_uart_tx(hwp_usart1, (uint8_t *)"TS:I\r\n", 6);
         return -1;
+    }
 
     int flash_id = ((uint32_t)sec_config_cache.running_imgs[CORE_HCPU]
                     - g_config_addr - 0x1000)
@@ -130,10 +173,12 @@ static int try_boot_from_slot(int slot_is_b)
     if (slot_is_b)
         sec_config_cache.ftab[flash_id].base = BOOT_SLOT_B_PHYS;
 
+    boot_uart_tx(hwp_usart1, (uint8_t *)"TS:J\r\n", 6);
     dfu_boot_img_in_flash(flash_id);
 
     HAL_FLASH_AES_CFG(boot_handle, 0);
     SCB_CleanInvalidateDCache();
+    boot_uart_tx(hwp_usart1, (uint8_t *)"TS:X\r\n", 6);
     return -1;
 }
 
@@ -296,38 +341,56 @@ void boot_images_help()
         dfu_boot_img_in_flash(flash_id);
     }
 #else
-    uint32_t active = HAL_Get_backup(BOOT_ACTIVE_IDX);
-    uint32_t trial  = HAL_Get_backup(BOOT_TRY_IDX);
+    struct ab_persist_bl ab;
     int first_is_b;
+    uint32_t ab_addr = ab_persist_addr_runtime();
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:0\r\n", 6);
 
-    if (trial == BOOT_TRY_B)
+    if (ab_addr != 0)
     {
-        HAL_Set_backup(BOOT_TRY_IDX, 0);
-        HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_B);
-        first_is_b = 1;
-    }
-    else if (trial == BOOT_TRY_A)
-    {
-        HAL_Set_backup(BOOT_TRY_IDX, 0);
-        HAL_Set_backup(BOOT_COMMIT_IDX, BOOT_COMMIT_A);
-        first_is_b = 0;
+        g_flash_read(ab_addr, (const int8_t *)&ab, sizeof(ab));
     }
     else
     {
-        if (active == BOOT_ACTIVE_B)
-            first_is_b = 1;
-        else if (active == BOOT_ACTIVE_A)
-            first_is_b = 0;
-        else
-            first_is_b = get_cold_boot_slot();
+        memset(&ab, 0, sizeof(ab));
+        boot_uart_tx(hwp_usart1, (uint8_t *)"BH:W\r\n", 6); /* no valid ab_persist address */
     }
 
-    board_init_psram();
+    if (ab.magic != AB_PERSIST_MAGIC)
+    {
+        first_is_b = get_cold_boot_slot();
+    }
+    else
+    {
+        uint32_t pt = ab.pending_try;
+        if (pt != BOOT_TRY_A && pt != BOOT_TRY_B)
+            pt = 0;
 
+        if (pt == BOOT_TRY_B)
+        {
+            first_is_b = 1;
+        }
+        else if (pt == BOOT_TRY_A)
+        {
+            first_is_b = 0;
+        }
+        else if (ab.active_slot == 1)
+            first_is_b = 1;
+        else
+            first_is_b = 0;
+    }
+
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:P\r\n", 6);
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:R0\r\n", 7);
+    board_init_psram();
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:R1\r\n", 7);
+
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:T0\r\n", 7);
     try_boot_from_slot(first_is_b);
 
-    HAL_Set_backup(BOOT_COMMIT_IDX, 0);
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:T1\r\n", 7);
     try_boot_from_slot(!first_is_b);
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BH:E\r\n", 6);
 #endif
 }
 
@@ -363,6 +426,8 @@ void hw_preinit0(void)
     int entry(void)
 #endif
 {
+    /* Diagnostic: confirm 2nd-stage bootloader reached (UART still configured by BootROM) */
+    boot_uart_tx(hwp_usart1, (uint8_t *)"BL:S\r\n", 6);
 
     HAL_Delay_us(0);
 
@@ -381,10 +446,16 @@ void hw_preinit0(void)
         {
             // 6. Read boot options
             board_boot_src = board_boot_from();
+            {
+                uint8_t dbuf[4] = {'B', 'S', ':', '0' + (uint8_t)(board_boot_src & 0xF)};
+                boot_uart_tx(hwp_usart1, dbuf, 4);
+                boot_uart_tx(hwp_usart1, (uint8_t *)"\r\n", 2);
+            }
 
             /* init AES_ACC as normal mode */
             __HAL_SYSCFG_CLEAR_SECURITY();
             dfu_flash_init();
+            boot_uart_tx(hwp_usart1, (uint8_t *)"BL:F\r\n", 6); /* flash init done */
             boot_images_help();
         }
     }
@@ -392,6 +463,11 @@ void hw_preinit0(void)
     {
         // 3. Read boot options
         board_boot_src = board_boot_from();
+        {
+            uint8_t dbuf[4] = {'B', 'S', ':', '0' + (uint8_t)(board_boot_src & 0xF)};
+            boot_uart_tx(hwp_usart1, dbuf, 4);
+            boot_uart_tx(hwp_usart1, (uint8_t *)"\r\n", 2);
+        }
 
         // 4. Power on flash.
         board_flash_power_on();
@@ -407,6 +483,7 @@ void hw_preinit0(void)
             /* init AES_ACC as normal mode */
             __HAL_SYSCFG_CLEAR_SECURITY();
             dfu_flash_init();
+            boot_uart_tx(hwp_usart1, (uint8_t *)"BL:F\r\n", 6); /* flash init done */
             boot_images_help();
         }
     }

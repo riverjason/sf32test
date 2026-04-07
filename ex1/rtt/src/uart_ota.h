@@ -28,32 +28,33 @@
 #define UART_OTA_FTAB_SIZE      0x00008000UL /* 32 KiB per ftab */
 
 #define UART_OTA_AB_PERSIST_MAGIC  0x41425053UL /* "ABPS" */
-#define UART_OTA_AB_PERSIST_ADDR   0x12880000UL /* DFU_DOWNLOAD_REGION 首部，独立于 ftab/image */
+/* 固定到 DFU 区前半段扇区，避开高地址映射不稳定和下载缓冲尾部踩踏 */
+#define UART_OTA_AB_PERSIST_ADDR   0x1277F000UL
 
+/*
+ * A/B state in Flash @ UART_OTA_AB_PERSIST_ADDR (one sector, 4 KiB erase).
+ * Bootloader and app must keep this layout in sync (see butterflmicro/board/main.c).
+ *
+ * - active_slot: confirmed boot bank (0=A, 1=B).
+ * - pending_try: app sets TRYA/TRYB before reboot; bootloader clears and sets commit.
+ * - commit: bootloader sets CMTA/CMTB for the trial jump; app clears after confirm.
+ */
 #pragma pack(push, 1)
 struct ab_persist
 {
     uint32_t magic;
     uint32_t active_slot;   /* 0 = Slot A, 1 = Slot B */
+    uint32_t pending_try;   /* 0, or TRYA / TRYB */
+    uint32_t commit;        /* 0, or CMTA / CMTB */
 };
 #pragma pack(pop)
 
-/*
- * A/B boot state in RTC backup registers.
- * - ACTIVE: persistent current slot selection
- * - TRY: one-shot trial boot target (bootloader clears before jump)
- * - COMMIT: set by bootloader before trial jump, consumed by app after successful startup
- */
-#define UART_OTA_BOOT_ACTIVE_IDX    9
-#define UART_OTA_BOOT_TRY_IDX       8
-#define UART_OTA_BOOT_COMMIT_IDX    7
+#define UART_OTA_AB_PERSIST_BYTES   ((uint32_t)sizeof(struct ab_persist))
 
-#define UART_OTA_BOOT_ACTIVE_A      0x41435441UL /* "ACTA" */
-#define UART_OTA_BOOT_ACTIVE_B      0x41435442UL /* "ACTB" */
-#define UART_OTA_BOOT_TRY_A         0x54525941UL /* "TRYA" */
-#define UART_OTA_BOOT_TRY_B         0x54525942UL /* "TRYB" */
-#define UART_OTA_BOOT_COMMIT_A      0x434D5441UL /* "CMTA" */
-#define UART_OTA_BOOT_COMMIT_B      0x434D5442UL /* "CMTB" */
+#define UART_OTA_TRY_A              0x54525941UL /* "TRYA" */
+#define UART_OTA_TRY_B              0x54525942UL /* "TRYB" */
+#define UART_OTA_COMMIT_A           0x434D5441UL /* "CMTA" */
+#define UART_OTA_COMMIT_B           0x434D5442UL /* "CMTB" */
 
 #pragma pack(push, 1)
 struct uart_ota_meta

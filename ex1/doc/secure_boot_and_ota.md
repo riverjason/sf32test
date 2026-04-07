@@ -103,10 +103,12 @@ Bootloader 的验证依赖：
 0x12020000      4 MB    Slot A (应用镜像，XIP 执行)
 0x12420000      4 MB    Slot B (OTA 目标槽)
 0x12820000     ...      DFU / KVDB / FS 等
-0x12880000      4 KB    A/B 持久化标记 (struct ab_persist, magic "ABPS")
+0x1289F000      4 KB    A/B 状态扇区（DFU_DOWNLOAD 区**最后一扇区**）：首部 16B 为 `struct ab_persist`（magic "ABPS"）
 ```
 
-每个 Slot 最后 4KB (`0x003FF000`) 保留给 `uart_ota_meta`，记录镜像长度和 CRC。
+`ab_persist` 与 Bootloader 共用同一布局（见 `ex1/rtt/src/uart_ota.h` 与 `butterflmicro/board/main.c` 内注释）。放在 **`0x1289F000`**（`DFU_DOWNLOAD_REGION` 末尾前的最后一个 4KB 扇区），避免与从 `0x12780000` 起顺序使用的下载缓冲重叠。**每次更新该状态都会擦除此扇区整 4KB**，再写入 16 字节记录。
+
+每个 Slot 最后 4KB (`0x003FF000`) 保留给 `uart_ota_meta`，记录镜像长度和 CRC（与 `ab_persist` 无关）。
 
 ---
 
@@ -263,16 +265,21 @@ Bootloader 位于 `SiFli-SDK/example/boot_loader/project/butterflmicro/board/mai
 
 ### 8.1 上电 → 选槽
 
+A/B 试启动与确认状态**全部在 Flash** `0x1289F000` 的 `ab_persist` 中维护，**不再使用 RTC BKP7/8/9**（避免与 SDK 对备份寄存器的定义冲突）。
+
 ```
 1. 读 eFuse Bank0 (UID / SIG_HASH / SECURE_FLAG)
-2. 检查 RTC Backup 寄存器:
-   ├── TRY_B (0x54525942)? → 清 TRY, 置 COMMIT_B, 优先启动 Slot B
-   ├── TRY_A (0x54525941)? → 清 TRY, 置 COMMIT_A, 优先启动 Slot A
-   └── 否则: 按 ACTIVE 或 Flash 持久化标记 (ABPS) 选槽
+2. 读 Flash @ 0x1289F000 → struct ab_persist (16B)
+   ├── magic != "ABPS"? → 按旧规则 get_cold_boot_slot()（仅看前两字是否曾为合法 ABPS+active）
+   ├── pending_try == TRY_B (0x54525942)? → 写回 Flash: pending_try=0, commit=CMTB → 优先 Slot B
+   ├── pending_try == TRY_A (0x54525941)? → 写回 Flash: pending_try=0, commit=CMTA → 优先 Slot A
+   └── 否则 → active_slot==1 优先 B，否则优先 A
 3. 初始化 PSRAM
 4. try_boot_from_slot(优先槽)
-5. 若失败 → 清 COMMIT → try_boot_from_slot(另一槽)
+5. 若失败 → 写回 Flash 清 commit → try_boot_from_slot(另一槽)
 ```
+
+每次 Bootloader 更新 `ab_persist` 时同样为：**擦除该 4KB 扇区 + 写回 16 字节结构**（见下文「何时擦写」）。
 
 ### 8.2 try_boot_from_slot 详细流程
 
@@ -383,7 +390,8 @@ Bootloader 位于 `SiFli-SDK/example/boot_loader/project/butterflmicro/board/mai
 
 6. Phase 3: 重启 (95%~100%)
    └── REBOOT
-       └── 设备: 设置 RTC Backup[8] = TRY_B → HAL_PMU_Reboot()
+       └── 设备: 写 Flash `ab_persist.pending_try` = TRY_B（或 TRY_A，视目标槽）→ HAL_PMU_Reboot()
+           （擦除 0x1289F000 起 4KB 扇区后写入 16B 记录，见 §10.4）
 ```
 
 ### 9.4 为什么先写 image 后写 ftab
@@ -393,41 +401,50 @@ ftab 是 Bootloader 的"入口配置"。如果先写 ftab 后写 image，在 ima
 
 **先写 image → 再写 ftab** 保证：只有 image 完整落盘后，ftab 才指向它。
 
+### 9.5 串口 OTA「开始不了」/ HELLO 超时
+
+- **同一串口只能被一个程序占用**：关闭串口调试助手、另一路 OTA 工具后再点升级。
+- **波特率**：工具默认 **1 000 000**（1M），须与固件控制台 UART 一致。
+- **须先进入 OTA 模式**：PC 工具会发 `uart_ota start\r\n`，固件打印 `*** UART_OTA_MODE ***` 后再发 HELLO；若 shell 忙（大量 BLE/日志），可适当延长等待（工具已轮询横幅最多约 4s）。
+- **也可手动**：在 msh 里先执行 `uart_ota start`，再在工具里升级（工具仍会再发一次 `uart_ota start`，无害）。
+
 ---
 
 ## 10. A/B 槽切换与回退机制
 
-### 10.1 状态寄存器
+### 10.1 Flash 中的 `ab_persist`（唯一真相源）
 
-使用 RTC Backup Register 维护启动状态（掉电不丢失）：
+地址 **`0x1289F000`**（DFU 下载区末端专用扇区），占 **4KB**；有效数据为首部 **16 字节**（其余字节在擦除后为 `0xFF`）。
 
-| 寄存器下标 | 名称 | 取值 | 含义 |
-|-----------|------|------|------|
-| 9 | ACTIVE | "ACTA" / "ACTB" | 当前确认的活跃槽 |
-| 8 | TRY | "TRYA" / "TRYB" | 一次性试启动目标 |
-| 7 | COMMIT | "CMTA" / "CMTB" | Bootloader 置位，应用消费 |
+| 字段 | 类型 | 取值 | 含义 |
+|------|------|------|------|
+| `magic` | u32 | `0x41425053` ("ABPS") | 魔数 |
+| `active_slot` | u32 | `0` / `1` | 已确认的活跃槽：0=Slot A，1=Slot B |
+| `pending_try` | u32 | `0` / `TRYA` / `TRYB` | 应用在下一次重启前要试的槽（一次性） |
+| `commit` | u32 | `0` / `CMTA` / `CMTB` | Bootloader 在消费 `pending_try` 后写入，供应用确认试跑成功 |
 
-Flash 持久化（冷启动参考）：
+魔数与字符串常量（与代码一致）：
 
-| 地址 | 结构 | 含义 |
-|------|------|------|
-| 0x12880000 | `{magic="ABPS", active_slot=0/1}` | 长期记忆活跃槽 |
+- `TRYA` = `0x54525941`，`TRYB` = `0x54525942`
+- `CMTA` = `0x434D5441`，`CMTB` = `0x434D5442`
+
+**兼容**：仅烧写过旧版 8 字节 `{magic, active_slot}` 的设备，后 8 字节多为 `0xFF`，会被当作无效的 `pending_try`/`commit` 而视为 0，逻辑仍按 `active_slot` 选槽。
 
 ### 10.2 OTA 后的启动时序
 
 ```
                      OTA 写入完成
                           │
-                     设置 TRY=TRY_B
+              Flash: pending_try = TRY_B, commit = 0
+              （擦 0x1289F000 起 4KB + 写 ab_persist）
                           │
                      PMU Reboot
                           │
                           ▼
               ┌─── Bootloader 启动 ───┐
               │                       │
-              │  读到 TRY=TRY_B       │
-              │  清除 TRY             │
-              │  设置 COMMIT=COMMIT_B │
+              │  读到 pending_try=B   │
+              │  写 Flash: pending_try=0, commit=CMTB │
               │  尝试从 Slot B 启动   │
               │    ├── 读 ftab_B      │
               │    ├── 解密 image_B   │
@@ -438,17 +455,16 @@ Flash 持久化（冷启动参考）：
               │   Yes       No        │
               │    │         │        │
               │    ▼         ▼        │
-              │ run_img   清 COMMIT   │
-              │ (Slot B)  尝试 Slot A │
+              │ run_img   写 Flash 清 commit │
+              │ (Slot B)  再试 Slot A │
               └───────────────────────┘
                     │
                     ▼
          ┌─── 应用启动 (uart_ota_init) ───┐
          │                                 │
-         │  检测到 COMMIT=COMMIT_B         │
-         │    → 设置 ACTIVE=ACTIVE_B       │
-         │    → 清除 COMMIT                │
-         │    → Flash 持久化 (ABPS)        │
+         │  读 Flash: commit==CMTB       │
+         │    → active_slot=1, pending_try=0, commit=0 │
+         │    → 擦扇区 + 写回 ab_persist  │
          │    → 升级确认完成               │
          └─────────────────────────────────┘
 ```
@@ -457,11 +473,30 @@ Flash 持久化（冷启动参考）：
 
 | 场景 | 结果 |
 |------|------|
-| 新固件启动成功 | 应用 `uart_ota_init` 确认 → ACTIVE 切到新槽 |
-| 新固件验签失败 | Bootloader 清 COMMIT，回退到旧槽启动 |
-| 新固件启动后崩溃（未执行 uart_ota_init） | 下次启动 COMMIT 仍在但 ACTIVE 未变，仍从旧槽启动 |
+| 新固件启动成功 | 应用 `uart_ota_init` 见 `commit` 匹配 → 更新 `active_slot` 并清 `commit` |
+| 新固件验签失败 | Bootloader 清 `commit`（Flash 写回）后从另一槽启动 |
+| 新固件启动后崩溃（未执行 uart_ota_init） | `commit` 仍在 Flash；`active_slot` 未改；下次上电仍按原 `active_slot` 优先，行为与「未确认升级」一致 |
 | OTA 中途断电（image 写了一半） | ftab 未更新 → Bootloader 仍用旧 ftab → 启动旧槽 |
 | OTA ftab 写了一半 | 新 ftab magic 不对 → try_boot_from_slot 返回 -1 → 回退旧槽 |
+
+### 10.4 何时会改写 `ab_persist`、何时会擦写 Flash？
+
+本工程约定：**只要更新 `ab_persist`，就对 `0x1289F000` 起整扇区（4KB）执行擦除，再写入新的 16 字节结构**（Nor Flash 最小擦除单位通常为扇区，不能只改几个字节）。
+
+| 时机 | 所在代码 | 发生什么 |
+|------|----------|----------|
+| OTA 发 `REBOOT` / 命令 `uart_ota reboot` | 应用 `set_try_boot_for_target()` | 设置 `pending_try`（`TRYA`/`TRYB`），`commit=0`；**擦 4KB + 写** |
+| 应用首次发现 Flash 无合法 ABPS | `uart_ota_init()` | 初始化为 `active_slot=0` 等；**擦 4KB + 写** |
+| 应用确认试跑成功 | `uart_ota_init()` 识别 `commit` 后 `write_active_persist()` | 更新 `active_slot`，清 `pending_try`/`commit`；**擦 4KB + 写** |
+| Bootloader 消费一次性试槽 | `boot_images_help()` | `pending_try`→0，写入对应 `commit`；**擦 4KB + 写** |
+| Bootloader 第一次试槽失败、准备试另一槽 | `boot_images_help()` 在第二次 `try_boot_from_slot` 前 | 清 `commit`；**擦 4KB + 写** |
+
+**小结**：
+
+- **会改 `ab_persist` 内容** = 上表中任一事件（试重启、Bootloader 握手、应用确认、初始化默认值、失败回退清 commit）。
+- **会擦写** = 上述每一次保存都是「**整扇区擦除 + 再编程**」，并不仅擦 16 字节；该扇区其余 4080 字节在擦后为 `0xFF`，当前实现不会额外写入。
+
+**注意**：`0x1289F000`～`0x1289FFFF` 专用于 `ab_persist`；勿将文件系统或其它数据放在该扇区。
 
 ---
 
@@ -482,7 +517,7 @@ make.bat clean          :: 清理构建目录
 ```
 efuse info                  :: 查看 UID / SIG_HASH / SECURE_FLAG / ROOT_KEY
 efuse dump                  :: 转储所有 eFuse bank
-uart_ota status             :: 查看 A/B 槽状态
+uart_ota status             :: 查看 A/B 槽与 Flash ab_persist（0x1289F000）
 uart_ota start              :: 进入 OTA 接收模式
 uart_ota reboot             :: 设置试启动并重启
 cmd_reboot                  :: 软复位

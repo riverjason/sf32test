@@ -8,7 +8,7 @@
 #include <string.h>
 #include <finsh.h>
 #include "drv_flash.h"
-#include "bf0_hal.h"
+#include "bf0_hal.h" /* HAL_PMU_Reboot */
 
 #define LOG_TAG "uart_ota"
 #include "log.h"
@@ -41,6 +41,9 @@ static uint32_t s_finish_crc;
 static uint32_t s_target_base = UART_OTA_SLOT_B_BASE;
 static uint32_t s_target_size = UART_OTA_SLOT_SIZE;
 static uint32_t s_image_slot_base;
+
+static void ab_persist_load(struct ab_persist *m);
+static int ab_persist_save(const struct ab_persist *m);
 
 /* ---- CRC32 (IEEE / zlib, poly 0xEDB88320) ---- */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *p, int len)
@@ -93,8 +96,11 @@ static void send_rsp(uint8_t orig_cmd, uint8_t status, const uint8_t *extra, uin
 
 static uint32_t get_active_slot_base(void)
 {
-    uint32_t active = HAL_Get_backup(UART_OTA_BOOT_ACTIVE_IDX);
-    return (active == UART_OTA_BOOT_ACTIVE_B) ? UART_OTA_SLOT_B_BASE : UART_OTA_SLOT_A_BASE;
+    struct ab_persist m;
+    ab_persist_load(&m);
+    if (m.magic != UART_OTA_AB_PERSIST_MAGIC)
+        return UART_OTA_SLOT_A_BASE;
+    return (m.active_slot == 1) ? UART_OTA_SLOT_B_BASE : UART_OTA_SLOT_A_BASE;
 }
 
 static uint32_t pick_target_slot_base(void)
@@ -109,10 +115,17 @@ static uint32_t pick_target_ftab_base(void)
 
 static void set_try_boot_for_target(uint32_t target_base)
 {
-    if (target_base == UART_OTA_SLOT_B_BASE)
-        HAL_Set_backup(UART_OTA_BOOT_TRY_IDX, UART_OTA_BOOT_TRY_B);
-    else
-        HAL_Set_backup(UART_OTA_BOOT_TRY_IDX, UART_OTA_BOOT_TRY_A);
+    struct ab_persist m;
+    ab_persist_load(&m);
+    if (m.magic != UART_OTA_AB_PERSIST_MAGIC)
+    {
+        memset(&m, 0, sizeof(m));
+        m.magic       = UART_OTA_AB_PERSIST_MAGIC;
+        m.active_slot = 0;
+    }
+    m.pending_try = (target_base == UART_OTA_SLOT_B_BASE) ? UART_OTA_TRY_B : UART_OTA_TRY_A;
+    m.commit      = 0;
+    (void)ab_persist_save(&m);
 }
 
 static const char *slot_name(uint32_t base)
@@ -146,6 +159,57 @@ static int flash_write_at(uint32_t addr, const uint8_t *d, uint32_t len)
 {
     int w = rt_flash_write(addr, d, (int)len);
     return (w == (int)len) ? 0 : -1;
+}
+
+static uint32_t ab_persist_addr(void)
+{
+    uint32_t total = (uint32_t)rt_flash_get_total_size(UART_OTA_FTAB_A_BASE);
+    uint32_t base = UART_OTA_FTAB_A_BASE;
+    uint32_t cand = UART_OTA_AB_PERSIST_ADDR;
+
+    if (total >= 0x1000)
+    {
+        uint32_t end = base + total;
+        if (cand < base || (cand + UART_OTA_AB_PERSIST_BYTES) > end)
+            cand = end - 0x1000;
+    }
+    return cand;
+}
+
+/* ---- A/B persist (Flash @ UART_OTA_AB_PERSIST_ADDR), no RTC BKP ---- */
+static void ab_persist_load(struct ab_persist *m)
+{
+    uint32_t addr = ab_persist_addr();
+    if (rt_flash_read(addr, (uint8_t *)m, sizeof(*m)) != (int)sizeof(*m))
+    {
+        memset(m, 0, sizeof(*m));
+        return;
+    }
+    if (m->magic != UART_OTA_AB_PERSIST_MAGIC)
+    {
+        memset(m, 0, sizeof(*m));
+        return;
+    }
+    if (m->pending_try != UART_OTA_TRY_A && m->pending_try != UART_OTA_TRY_B)
+        m->pending_try = 0;
+    if (m->commit != UART_OTA_COMMIT_A && m->commit != UART_OTA_COMMIT_B)
+        m->commit = 0;
+}
+
+static int ab_persist_save(const struct ab_persist *m)
+{
+    uint32_t addr = ab_persist_addr();
+    if (flash_erase_range(addr, 0x1000) != 0)
+    {
+        LOG_E("ab_persist erase fail @ 0x%lx", (unsigned long)addr);
+        return -1;
+    }
+    if (flash_write_at(addr, (const uint8_t *)m, sizeof(*m)) != 0)
+    {
+        LOG_E("ab_persist write fail @ 0x%lx", (unsigned long)addr);
+        return -1;
+    }
+    return 0;
 }
 
 static uint32_t crc_image(uint32_t slot_base, uint32_t nbytes)
@@ -430,33 +494,60 @@ static void write_active_persist(int slot_is_b)
     struct ab_persist m;
     m.magic       = UART_OTA_AB_PERSIST_MAGIC;
     m.active_slot = slot_is_b ? 1 : 0;
-
-    flash_erase_range(UART_OTA_AB_PERSIST_ADDR, 0x1000);
-    flash_write_at(UART_OTA_AB_PERSIST_ADDR, (const uint8_t *)&m, sizeof(m));
+    m.pending_try = 0;
+    m.commit      = 0;
+    (void)ab_persist_save(&m);
 }
 
 void uart_ota_init(void)
 {
-    uint32_t commit = HAL_Get_backup(UART_OTA_BOOT_COMMIT_IDX);
-    if (commit == UART_OTA_BOOT_COMMIT_A)
+    struct ab_persist m;
+    uint32_t ab_addr = ab_persist_addr();
+    ab_persist_load(&m);
+
+    if (m.magic != UART_OTA_AB_PERSIST_MAGIC)
     {
-        HAL_Set_backup(UART_OTA_BOOT_ACTIVE_IDX, UART_OTA_BOOT_ACTIVE_A);
-        HAL_Set_backup(UART_OTA_BOOT_COMMIT_IDX, 0);
-        write_active_persist(0);
-        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=A (persisted to flash)\n");
+        memset(&m, 0, sizeof(m));
+        m.magic       = UART_OTA_AB_PERSIST_MAGIC;
+        m.active_slot = 0;
+        m.pending_try = 0;
+        m.commit      = 0;
+        (void)ab_persist_save(&m);
+        rt_kprintf("[uart_ota] ab_persist invalid/missing: initialized ACTIVE=A @ 0x%08lx\n",
+                   (unsigned long)ab_addr);
     }
-    else if (commit == UART_OTA_BOOT_COMMIT_B)
+    else if (m.commit == UART_OTA_COMMIT_A)
     {
-        HAL_Set_backup(UART_OTA_BOOT_ACTIVE_IDX, UART_OTA_BOOT_ACTIVE_B);
-        HAL_Set_backup(UART_OTA_BOOT_COMMIT_IDX, 0);
+        write_active_persist(0);
+        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=A (flash @ 0x%08lx)\n",
+                   (unsigned long)ab_addr);
+    }
+    else if (m.commit == UART_OTA_COMMIT_B)
+    {
         write_active_persist(1);
-        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=B (persisted to flash)\n");
+        rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=B (flash @ 0x%08lx)\n",
+                   (unsigned long)ab_addr);
     }
     else
     {
-        uint32_t active = HAL_Get_backup(UART_OTA_BOOT_ACTIVE_IDX);
-        if (active != UART_OTA_BOOT_ACTIVE_A && active != UART_OTA_BOOT_ACTIVE_B)
-            HAL_Set_backup(UART_OTA_BOOT_ACTIVE_IDX, UART_OTA_BOOT_ACTIVE_A);
+        /*
+         * Bootloader no longer writes commit in early boot. Confirm by current execution slot:
+         * if we are running from the pending trial slot, mark it active and clear pending.
+         */
+        uint32_t pc = (uint32_t)(uintptr_t)&uart_ota_init;
+        uint32_t cur_slot_is_b = (pc >= UART_OTA_SLOT_B_BASE && pc < (UART_OTA_SLOT_B_BASE + UART_OTA_SLOT_SIZE)) ? 1U : 0U;
+        uint32_t pending_match = (cur_slot_is_b && m.pending_try == UART_OTA_TRY_B)
+                               || (!cur_slot_is_b && m.pending_try == UART_OTA_TRY_A);
+        if (pending_match || m.active_slot != cur_slot_is_b)
+        {
+            m.magic       = UART_OTA_AB_PERSIST_MAGIC;
+            m.active_slot = cur_slot_is_b;
+            m.pending_try = 0;
+            m.commit      = 0;
+            (void)ab_persist_save(&m);
+            rt_kprintf("[uart_ota] Boot confirmed by runtime slot: ACTIVE=%s (flash @ 0x%08lx)\n",
+                       cur_slot_is_b ? "B" : "A", (unsigned long)ab_addr);
+        }
     }
 
     {
@@ -490,6 +581,138 @@ static int cmd_uart_ota(int argc, char **argv)
         rt_thread_mdelay(50);
         HAL_PMU_Reboot();
     }
+    else if (strcmp(argv[1], "verify") == 0)
+    {
+        /*
+         * Read ftab of the INACTIVE (target) slot and display key fields.
+         * Helps diagnose why the bootloader rejects Slot B after OTA.
+         *
+         * ftab layout (struct sec_configuration):
+         *   [0]      u32  magic          (0x53454346 = "SECF")
+         *   [4]      flash_table[16]     (16 bytes each = 256 bytes)
+         *   [260]    sig_pub_key[294]
+         *   [4096]   image_header_enc[14] (512 bytes each)
+         *   [11264]  running_imgs[4]     (pointers, 4 bytes each)
+         *
+         * image_header_enc layout (at IMG_OFFSET = 4096 + 2*512 = 5120 for HCPU):
+         *   [0] u32  length
+         *   [4] u16  blksize
+         *   [6] u16  flags
+         *   [8] u8   key[32]  (encrypted session key)
+         *   [40] u8  sig[256] (RSA signature)
+         */
+        #define FTAB_MAGIC       0x53454346UL
+        #define FTAB_SIZE_BYTES  11280
+        #define FTAB_IMG_OFFSET  5120   /* imgs[2] = HCPU */
+        #define FTAB_RUNIMG_OFF  11264  /* running_imgs[0] */
+        #define FTAB_SIGKEY_OFF  260
+        #define FTAB_FLASH4_OFF  (4 + 4 * 16) /* ftab[4].base */
+
+        uint32_t active_base = get_active_slot_base();
+        uint32_t ftab_addr = (active_base == UART_OTA_SLOT_A_BASE)
+                             ? UART_OTA_FTAB_B_BASE : UART_OTA_FTAB_A_BASE;
+        uint32_t img_addr  = (active_base == UART_OTA_SLOT_A_BASE)
+                             ? UART_OTA_SLOT_B_BASE : UART_OTA_SLOT_A_BASE;
+        const char *tname  = (active_base == UART_OTA_SLOT_A_BASE) ? "B" : "A";
+
+        rt_kprintf("=== Verify inactive Slot %s ===\n", tname);
+        rt_kprintf("ftab @ 0x%08lx, image @ 0x%08lx\n",
+                   (unsigned long)ftab_addr, (unsigned long)img_addr);
+
+        uint8_t buf[512];
+
+        /* 1. Magic */
+        if (rt_flash_read(ftab_addr, buf, 4) != 4) { rt_kprintf("FAIL: flash read\n"); return -1; }
+        uint32_t magic = buf[0] | (buf[1]<<8) | (buf[2]<<16) | (buf[3]<<24);
+        rt_kprintf("\n[1] ftab magic: 0x%08lx %s\n", (unsigned long)magic,
+                   (magic == FTAB_MAGIC) ? "OK" : "BAD (expect 0x53454346)");
+        if (magic != FTAB_MAGIC) return -1;
+
+        /* 2. ftab[4] (HCPU partition) */
+        if (rt_flash_read(ftab_addr + FTAB_FLASH4_OFF, buf, 16) != 16) { rt_kprintf("FAIL: read ftab[4]\n"); return -1; }
+        {
+            uint32_t base = buf[0]|(buf[1]<<8)|(buf[2]<<16)|(buf[3]<<24);
+            uint32_t size = buf[4]|(buf[5]<<8)|(buf[6]<<16)|(buf[7]<<24);
+            uint32_t xip  = buf[8]|(buf[9]<<8)|(buf[10]<<16)|(buf[11]<<24);
+            uint32_t flg  = buf[12]|(buf[13]<<8)|(buf[14]<<16)|(buf[15]<<24);
+            rt_kprintf("\n[2] ftab[4] (HCPU): base=0x%08lx size=0x%lx xip=0x%08lx flags=0x%lx\n",
+                       (unsigned long)base, (unsigned long)size, (unsigned long)xip, (unsigned long)flg);
+            rt_kprintf("    (bootloader overrides base to 0x%08lx for Slot %s)\n",
+                       (unsigned long)img_addr, tname);
+        }
+
+        /* 3. running_imgs[CORE_HCPU=2] */
+        if (rt_flash_read(ftab_addr + FTAB_RUNIMG_OFF + 2*4, buf, 4) != 4) { rt_kprintf("FAIL: read running_imgs\n"); return -1; }
+        {
+            uint32_t rp = buf[0]|(buf[1]<<8)|(buf[2]<<16)|(buf[3]<<24);
+            rt_kprintf("\n[3] running_imgs[CORE_HCPU]: 0x%08lx", (unsigned long)rp);
+            if (rp == 0xFFFFFFFF)
+                rt_kprintf("  BAD (FLASH_UNINIT_32 -> bootloader skips this slot!)\n");
+            else
+                rt_kprintf("  OK\n");
+        }
+
+        /* 4. Image header at imgs[2] (HCPU) */
+        if (rt_flash_read(ftab_addr + FTAB_IMG_OFFSET, buf, 296) != 296) { rt_kprintf("FAIL: read img hdr\n"); return -1; }
+        {
+            uint32_t img_len = buf[0]|(buf[1]<<8)|(buf[2]<<16)|(buf[3]<<24);
+            uint16_t blksz   = buf[4]|(buf[5]<<8);
+            uint16_t flags   = buf[6]|(buf[7]<<8);
+            rt_kprintf("\n[4] Image header (imgs[2] @ ftab+0x%x):\n", FTAB_IMG_OFFSET);
+            rt_kprintf("    length   = 0x%08lx (%lu bytes)\n", (unsigned long)img_len, (unsigned long)img_len);
+            rt_kprintf("    blksize  = %u\n", (unsigned)blksz);
+            rt_kprintf("    flags    = 0x%04x", (unsigned)flags);
+            if (flags & 1) rt_kprintf(" [ENC]");
+            if (flags & 2) rt_kprintf(" [AUTO]");
+            rt_kprintf("\n");
+
+            rt_kprintf("    key[0:7] = ");
+            for (int i = 0; i < 8; i++) rt_kprintf("%02X", buf[8+i]);
+            rt_kprintf("\n");
+            rt_kprintf("    sig[0:7] = ");
+            for (int i = 0; i < 8; i++) rt_kprintf("%02X", buf[40+i]);
+            rt_kprintf("  sig[248:255] = ");
+            for (int i = 0; i < 8; i++) rt_kprintf("%02X", buf[40+248+i]);
+            rt_kprintf("\n");
+
+            int key_all_zero = 1, sig_all_zero = 1;
+            for (int i = 0; i < 32; i++) if (buf[8+i]) key_all_zero = 0;
+            for (int i = 0; i < 256; i++) if (buf[40+i]) sig_all_zero = 0;
+            if (key_all_zero) rt_kprintf("    WARNING: key is all-zero (no encrypted session key!)\n");
+            if (sig_all_zero) rt_kprintf("    WARNING: sig is all-zero (no RSA signature!)\n");
+
+            /* 5. sig_pub_key first 8 bytes */
+            if (rt_flash_read(ftab_addr + FTAB_SIGKEY_OFF, buf, 8) == 8)
+            {
+                rt_kprintf("\n[5] sig_pub_key[0:7] = ");
+                for (int i = 0; i < 8; i++) rt_kprintf("%02X", buf[i]);
+                int pk_all_ff = 1;
+                for (int i = 0; i < 8; i++) if (buf[i] != 0xFF) pk_all_ff = 0;
+                if (pk_all_ff) rt_kprintf("  WARNING: all 0xFF (not injected!)");
+                rt_kprintf("\n");
+            }
+
+            /* 6. First 16 bytes of Slot B image area (ciphertext) */
+            if (rt_flash_read(img_addr, buf, 16) == 16)
+            {
+                rt_kprintf("\n[6] Image data[0:15] @ 0x%08lx = ", (unsigned long)img_addr);
+                for (int i = 0; i < 16; i++) rt_kprintf("%02X", buf[i]);
+                int all_ff = 1;
+                for (int i = 0; i < 16; i++) if (buf[i] != 0xFF) all_ff = 0;
+                if (all_ff) rt_kprintf("  WARNING: all 0xFF (erased / no image data!)");
+                rt_kprintf("\n");
+            }
+
+            /* 7. CRC check on image region using length from header */
+            if (img_len > 0 && img_len <= UART_OTA_SLOT_SIZE)
+            {
+                uint32_t c = crc_image(img_addr, img_len);
+                rt_kprintf("\n[7] CRC32 of %lu bytes at 0x%08lx = 0x%08lx\n",
+                           (unsigned long)img_len, (unsigned long)img_addr, (unsigned long)c);
+            }
+        }
+        rt_kprintf("\n=== End verify ===\n");
+    }
     else if (strcmp(argv[1], "status") == 0)
     {
         rt_kprintf("Slot A: img 0x%08lx  ftab 0x%08lx\n",
@@ -499,15 +722,15 @@ static int cmd_uart_ota(int argc, char **argv)
         rt_kprintf("Slot size: 0x%lx  ftab size: 0x%lx\n",
                    (unsigned long)UART_OTA_SLOT_SIZE, (unsigned long)UART_OTA_FTAB_SIZE);
         {
-            uint32_t active = HAL_Get_backup(UART_OTA_BOOT_ACTIVE_IDX);
-            uint32_t trial = HAL_Get_backup(UART_OTA_BOOT_TRY_IDX);
-            uint32_t commit = HAL_Get_backup(UART_OTA_BOOT_COMMIT_IDX);
+            struct ab_persist st;
+            ab_persist_load(&st);
+            uint32_t ab_addr = ab_persist_addr();
             uint32_t active_base = get_active_slot_base();
             uint32_t target_base = pick_target_slot_base();
-            rt_kprintf("ACTIVE(BKP%d)=0x%08lx -> Slot %s\n", UART_OTA_BOOT_ACTIVE_IDX, (unsigned long)active,
-                       slot_name(active_base));
-            rt_kprintf("TRY(BKP%d)=0x%08lx COMMIT(BKP%d)=0x%08lx\n", UART_OTA_BOOT_TRY_IDX,
-                       (unsigned long)trial, UART_OTA_BOOT_COMMIT_IDX, (unsigned long)commit);
+            rt_kprintf("ab_persist @ 0x%08lx: magic=0x%08lx active=%lu pending_try=0x%08lx commit=0x%08lx\n",
+                       (unsigned long)ab_addr, (unsigned long)st.magic,
+                       (unsigned long)st.active_slot, (unsigned long)st.pending_try, (unsigned long)st.commit);
+            rt_kprintf("ACTIVE -> Slot %s\n", slot_name(active_base));
             rt_kprintf("Next OTA target: Slot %s (0x%08lx)\n", slot_name(target_base), (unsigned long)target_base);
         }
     }

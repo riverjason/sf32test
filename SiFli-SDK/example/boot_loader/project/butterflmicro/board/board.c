@@ -194,6 +194,16 @@ int board_boot_from(void)
 #else
     {
         r = HAL_Get_backup(RTC_BACKUP_BOOTOPT);
+        /*
+         * Secondary bootloader (CFG_BOOTLOADER, no CFG_BOOTROM): BootROM normally
+         * leaves RTC_BACKUP_BOOTOPT set. If backup is 0 (cold power, cleared RTC, or
+         * ROM quirk), dfu_flash_init() hits default -> boot_error('S') and the chip
+         * appears stuck after the ROM "SFBL" banner. Default to external NOR on MPI2.
+         */
+#ifdef CFG_BOOTLOADER
+        if (r < BOOT_FROM_SIP_PUYA || r > BOOT_FROM_EMMC)
+            r = BOOT_FROM_NOR;
+#endif
     }
 #endif
     return r;

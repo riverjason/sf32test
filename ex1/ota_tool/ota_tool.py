@@ -157,8 +157,23 @@ class OtaWorker:
 
     def _enter_ota_mode(self):
         self.log("Sending 'uart_ota start' ...")
+        self._ser.reset_input_buffer()
         self._ser.write(b"uart_ota start\r\n")
-        time.sleep(0.8)
+        # Wait until firmware prints OTA banner (BLE/log on same UART can delay shell)
+        banner = b"*** UART_OTA_MODE ***"
+        buf = bytearray()
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < 4.0:
+            chunk = self._ser.read(512)
+            if chunk:
+                buf.extend(chunk)
+                if banner in buf:
+                    self.log("  OTA mode entered.")
+                    break
+            else:
+                time.sleep(0.02)
+        else:
+            self.log("  [WARN] OTA banner not seen in 4s; continuing anyway (HELLO may timeout).")
         self._ser.reset_input_buffer()
 
     def _cmd_hello(self):
