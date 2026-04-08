@@ -17,7 +17,7 @@
 
 #define UART_OTA_SLOT_A_BASE    0x12020000UL
 #define UART_OTA_SLOT_B_BASE    0x12420000UL
-#define UART_OTA_SLOT_SIZE      0x00400000UL /* 4 MiB per bank */
+#define UART_OTA_SLOT_SIZE      0x003C0000UL /* 3.75 MiB per bank, keep ab_persist outside A/B erase range */
 #define UART_OTA_META_SECTOR    0x00001000UL /* B 区最后 4KB 存元数据，镜像最大 = SLOT_SIZE - META */
 #define UART_OTA_MAX_IMAGE_SIZE (UART_OTA_SLOT_SIZE - UART_OTA_META_SECTOR)
 
@@ -28,7 +28,7 @@
 #define UART_OTA_FTAB_SIZE      0x00008000UL /* 32 KiB per ftab */
 
 #define UART_OTA_AB_PERSIST_MAGIC  0x41425053UL /* "ABPS" */
-/* 固定到 DFU 区前半段扇区，避开高地址映射不稳定和下载缓冲尾部踩踏 */
+/* 固定到可稳定访问扇区（已实机验证可读写） */
 #define UART_OTA_AB_PERSIST_ADDR   0x1277F000UL
 
 /*
@@ -36,8 +36,8 @@
  * Bootloader and app must keep this layout in sync (see butterflmicro/board/main.c).
  *
  * - active_slot: confirmed boot bank (0=A, 1=B).
- * - pending_try: app sets TRYA/TRYB before reboot; bootloader clears and sets commit.
- * - commit: bootloader sets CMTA/CMTB for the trial jump; app clears after confirm.
+ * - pending_try: app sets TRYA/TRYB before reboot; next boot app confirms by this field.
+ * - commit: optional legacy field (kept for compatibility with older flow).
  */
 #pragma pack(push, 1)
 struct ab_persist

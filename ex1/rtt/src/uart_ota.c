@@ -26,7 +26,6 @@
 #define CMD_RSP     0x80
 
 #define MAX_FRAME_PAYLOAD 512
-
 static rt_bool_t s_ota_active;
 static rt_device_t s_uart;
 static rt_err_t (*s_saved_rx_ind)(rt_device_t dev, rt_size_t size);
@@ -41,6 +40,9 @@ static uint32_t s_finish_crc;
 static uint32_t s_target_base = UART_OTA_SLOT_B_BASE;
 static uint32_t s_target_size = UART_OTA_SLOT_SIZE;
 static uint32_t s_image_slot_base;
+static uint32_t s_stream_crc;
+static uint32_t s_stream_size;
+static rt_bool_t s_stream_crc_valid;
 
 static void ab_persist_load(struct ab_persist *m);
 static int ab_persist_save(const struct ab_persist *m);
@@ -265,6 +267,9 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
     }
     case CMD_ERASE_B:
         s_image_ofs = 0;
+        s_stream_crc = 0;
+        s_stream_size = 0;
+        s_stream_crc_valid = RT_TRUE;
         if (flash_erase_range(s_target_base, s_target_size) != 0)
             send_rsp(CMD_ERASE_B, 1, RT_NULL, 0);
         else
@@ -304,6 +309,15 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
             else
             {
                 s_image_ofs = off + dlen;
+                if (s_stream_crc_valid && off == s_stream_size)
+                {
+                    s_stream_crc = crc32_update(s_stream_crc, s_wr_snap, dlen);
+                    s_stream_size += dlen;
+                }
+                else
+                {
+                    s_stream_crc_valid = RT_FALSE;
+                }
                 send_rsp(CMD_DATA, 0, RT_NULL, 0);
             }
         }
@@ -322,7 +336,35 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
             break;
         }
         {
-            uint32_t c = crc_image(s_target_base, s_finish_size);
+            uint32_t c;
+            rt_bool_t use_stream_crc = RT_FALSE;
+
+            /*
+             * When running from Slot B, bootloader may keep XIP alias active for 0x12020000.
+             * In that case, rt_flash_read(Slot A XIP range) can read aliased Slot B data.
+             * Use streamed DATA CRC for Slot A verification to avoid alias readback mismatch.
+             */
+            if (get_active_slot_base() == UART_OTA_SLOT_B_BASE && s_target_base == UART_OTA_SLOT_A_BASE)
+                use_stream_crc = RT_TRUE;
+
+            if (use_stream_crc)
+            {
+                if (!s_stream_crc_valid || s_stream_size != s_finish_size)
+                {
+                    uint8_t eb[8];
+                    c = s_stream_crc;
+                    memcpy(eb, &c, 4);
+                    memcpy(eb + 4, &s_finish_crc, 4);
+                    send_rsp(CMD_FINISH, 3, eb, 8);
+                    break;
+                }
+                c = s_stream_crc;
+            }
+            else
+            {
+                c = crc_image(s_target_base, s_finish_size);
+            }
+
             if (c != s_finish_crc)
             {
                 uint8_t eb[8];
@@ -371,6 +413,9 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
                 s_target_base = base;
                 s_target_size = size;
                 s_image_ofs = 0;
+                s_stream_crc = 0;
+                s_stream_size = 0;
+                s_stream_crc_valid = RT_TRUE;
                 send_rsp(CMD_TARGET, 0, RT_NULL, 0);
             }
             else
@@ -516,6 +561,18 @@ void uart_ota_init(void)
         rt_kprintf("[uart_ota] ab_persist invalid/missing: initialized ACTIVE=A @ 0x%08lx\n",
                    (unsigned long)ab_addr);
     }
+    else if (m.pending_try == UART_OTA_TRY_A)
+    {
+        write_active_persist(0);
+        rt_kprintf("[uart_ota] Boot trial confirmed by pending_try: ACTIVE=A (flash @ 0x%08lx)\n",
+                   (unsigned long)ab_addr);
+    }
+    else if (m.pending_try == UART_OTA_TRY_B)
+    {
+        write_active_persist(1);
+        rt_kprintf("[uart_ota] Boot trial confirmed by pending_try: ACTIVE=B (flash @ 0x%08lx)\n",
+                   (unsigned long)ab_addr);
+    }
     else if (m.commit == UART_OTA_COMMIT_A)
     {
         write_active_persist(0);
@@ -527,27 +584,6 @@ void uart_ota_init(void)
         write_active_persist(1);
         rt_kprintf("[uart_ota] Boot trial confirmed: ACTIVE=B (flash @ 0x%08lx)\n",
                    (unsigned long)ab_addr);
-    }
-    else
-    {
-        /*
-         * Bootloader no longer writes commit in early boot. Confirm by current execution slot:
-         * if we are running from the pending trial slot, mark it active and clear pending.
-         */
-        uint32_t pc = (uint32_t)(uintptr_t)&uart_ota_init;
-        uint32_t cur_slot_is_b = (pc >= UART_OTA_SLOT_B_BASE && pc < (UART_OTA_SLOT_B_BASE + UART_OTA_SLOT_SIZE)) ? 1U : 0U;
-        uint32_t pending_match = (cur_slot_is_b && m.pending_try == UART_OTA_TRY_B)
-                               || (!cur_slot_is_b && m.pending_try == UART_OTA_TRY_A);
-        if (pending_match || m.active_slot != cur_slot_is_b)
-        {
-            m.magic       = UART_OTA_AB_PERSIST_MAGIC;
-            m.active_slot = cur_slot_is_b;
-            m.pending_try = 0;
-            m.commit      = 0;
-            (void)ab_persist_save(&m);
-            rt_kprintf("[uart_ota] Boot confirmed by runtime slot: ACTIVE=%s (flash @ 0x%08lx)\n",
-                       cur_slot_is_b ? "B" : "A", (unsigned long)ab_addr);
-        }
     }
 
     {

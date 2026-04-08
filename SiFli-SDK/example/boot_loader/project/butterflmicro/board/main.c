@@ -131,13 +131,12 @@ void boot_test(void)
 /* A/B OTA boot policy (Flash ab_persist @ AB_PERSIST_ADDR, no RTC BKP) */
 #define BOOT_SLOT_A_XIP     0x12020000UL
 #define BOOT_SLOT_B_PHYS    0x12420000UL
-#define BOOT_SLOT_SIZE      0x00400000UL
+#define BOOT_SLOT_SIZE      0x003C0000UL
 
 #define BOOT_TRY_A          0x54525941UL /* "TRYA" */
 #define BOOT_TRY_B          0x54525942UL /* "TRYB" */
 #define BOOT_COMMIT_A       0x434D5441UL /* "CMTA" */
 #define BOOT_COMMIT_B       0x434D5442UL /* "CMTB" */
-
 void dfu_boot_img_in_flash(int flashid);
 
 void run_img(uint32_t dest)

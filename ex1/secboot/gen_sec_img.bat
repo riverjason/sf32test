@@ -43,7 +43,6 @@ copy /y "%BUILD_DIR%\ftab\ftab.bin" "%OUT_DIR%\ftab.bin" >nul
 pushd "%OUT_DIR%"
 "%PY_EXE%" "%SEC_TOOL_DIR%\imgtool.py" enc_static ^
     --key="%KEY_DIR%\s01" ^
-    --uid="%KEY_DIR%\uid" ^
     --img="%BUILD_DIR%\main.bin" ^
     --eimg="%OUT_DIR%\image_sec.bin" ^
     --bksize=512 ^
