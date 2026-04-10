@@ -29,6 +29,17 @@
 static rt_bool_t s_ota_active;
 static rt_device_t s_uart;
 static rt_err_t (*s_saved_rx_ind)(rt_device_t dev, rt_size_t size);
+static uart_ota_ble_tx_cb_t s_ble_tx_cb;
+static uint16_t s_ble_mtu = 23;
+
+enum ota_transport
+{
+    OTA_TRANSPORT_NONE = 0,
+    OTA_TRANSPORT_UART,
+    OTA_TRANSPORT_BLE,
+};
+
+static enum ota_transport s_transport;
 
 static uint8_t s_rxbuf[8 + MAX_FRAME_PAYLOAD + 4];
 /* Snapshot DATA payload: rt_flash_write may malloc; UART RX must not clobber pl during long program */
@@ -46,6 +57,26 @@ static rt_bool_t s_stream_crc_valid;
 
 static void ab_persist_load(struct ab_persist *m);
 static int ab_persist_save(const struct ab_persist *m);
+
+static uint16_t current_max_frame_payload(void)
+{
+    if (s_transport == OTA_TRANSPORT_BLE)
+    {
+        /*
+         * ATT payload = MTU - 3.
+         * OTA frame overhead = SOF(2) + cmd(1) + len(2) + seq(2) + crc(4) = 11 bytes.
+         */
+        uint16_t att_payload = (s_ble_mtu > 3) ? (uint16_t)(s_ble_mtu - 3) : 0;
+        if (att_payload > 11)
+        {
+            uint16_t frame_payload = (uint16_t)(att_payload - 11);
+            return (frame_payload < MAX_FRAME_PAYLOAD) ? frame_payload : MAX_FRAME_PAYLOAD;
+        }
+        return 0;
+    }
+
+    return MAX_FRAME_PAYLOAD;
+}
 
 /* ---- CRC32 (IEEE / zlib, poly 0xEDB88320) ---- */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *p, int len)
@@ -66,7 +97,11 @@ static void send_frame(uint8_t cmd, const uint8_t *pl, uint16_t plen)
     uint32_t crc;
     uint16_t i = 0;
 
-    if (!s_uart || plen > MAX_FRAME_PAYLOAD)
+    if (plen > MAX_FRAME_PAYLOAD)
+        return;
+    if (s_transport == OTA_TRANSPORT_UART && !s_uart)
+        return;
+    if (s_transport == OTA_TRANSPORT_BLE && !s_ble_tx_cb)
         return;
     out[i++] = SOF0;
     out[i++] = SOF1;
@@ -84,7 +119,10 @@ static void send_frame(uint8_t cmd, const uint8_t *pl, uint16_t plen)
     out[i++] = (uint8_t)((crc >> 8) & 0xFF);
     out[i++] = (uint8_t)((crc >> 16) & 0xFF);
     out[i++] = (uint8_t)((crc >> 24) & 0xFF);
-    rt_device_write(s_uart, 0, out, i);
+    if (s_transport == OTA_TRANSPORT_UART)
+        rt_device_write(s_uart, 0, out, i);
+    else if (s_transport == OTA_TRANSPORT_BLE && s_ble_tx_cb)
+        (void)s_ble_tx_cb(out, i);
 }
 
 static void send_rsp(uint8_t orig_cmd, uint8_t status, const uint8_t *extra, uint16_t elen)
@@ -260,7 +298,7 @@ static void handle_cmd(uint8_t cmd, const uint8_t *pl, uint16_t plen)
         s_image_slot_base = s_target_base;
         info[0] = s_target_base;
         info[1] = UART_OTA_MAX_IMAGE_SIZE;
-        info[2] = MAX_FRAME_PAYLOAD;
+        info[2] = current_max_frame_payload();
         info[3] = pick_target_ftab_base();
         send_rsp(CMD_HELLO, 0, (uint8_t *)info, sizeof(info));
         break;
@@ -501,7 +539,7 @@ rt_bool_t uart_ota_mode_active(void)
 
 int uart_ota_mode_enter(void)
 {
-    if (s_ota_active)
+    if (s_ota_active || s_transport == OTA_TRANSPORT_BLE)
         return 0;
     s_uart = rt_console_get_device();
     if (s_uart == RT_NULL)
@@ -510,12 +548,13 @@ int uart_ota_mode_enter(void)
     parser_reset();
     rt_device_set_rx_indicate(s_uart, uart_ota_rx_ind);
     s_ota_active = RT_TRUE;
+    s_transport = OTA_TRANSPORT_UART;
     rt_kprintf("\n*** UART_OTA_MODE ***\nClose msh, use PC tool. uart_ota exit when done.\n");
     {
         s_target_base = pick_target_slot_base();
         s_target_size = UART_OTA_SLOT_SIZE;
         s_image_slot_base = s_target_base;
-        uint32_t info[4] = {s_target_base, UART_OTA_MAX_IMAGE_SIZE, MAX_FRAME_PAYLOAD, pick_target_ftab_base()};
+        uint32_t info[4] = {s_target_base, UART_OTA_MAX_IMAGE_SIZE, current_max_frame_payload(), pick_target_ftab_base()};
         send_rsp(CMD_HELLO, 0, (uint8_t *)info, sizeof(info));
     }
     return 0;
@@ -528,10 +567,62 @@ void uart_ota_mode_exit(void)
     rt_device_set_rx_indicate(s_uart, s_saved_rx_ind);
     s_saved_rx_ind = RT_NULL;
     s_ota_active = RT_FALSE;
+    if (s_transport == OTA_TRANSPORT_UART)
+        s_transport = OTA_TRANSPORT_NONE;
     s_uart = RT_NULL;
     parser_reset();
     rt_console_set_device(RT_CONSOLE_DEVICE_NAME);
     rt_kprintf("UART OTA mode off, finsh restored.\n");
+}
+
+int uart_ota_ble_mode_enter(uart_ota_ble_tx_cb_t tx_cb)
+{
+    if (!tx_cb)
+        return -1;
+    if (s_ota_active)
+        return -2;
+
+    s_ble_tx_cb = tx_cb;
+    s_transport = OTA_TRANSPORT_BLE;
+    parser_reset();
+    s_target_base = pick_target_slot_base();
+    s_target_size = UART_OTA_SLOT_SIZE;
+    s_image_slot_base = s_target_base;
+    return 0;
+}
+
+void uart_ota_ble_mode_exit(void)
+{
+    if (s_transport != OTA_TRANSPORT_BLE)
+        return;
+
+    s_ble_tx_cb = RT_NULL;
+    s_transport = OTA_TRANSPORT_NONE;
+    parser_reset();
+}
+
+rt_bool_t uart_ota_ble_mode_active(void)
+{
+    return (s_transport == OTA_TRANSPORT_BLE) ? RT_TRUE : RT_FALSE;
+}
+
+void uart_ota_ble_set_mtu(uint16_t mtu)
+{
+    if (mtu >= 23)
+        s_ble_mtu = mtu;
+}
+
+int uart_ota_ble_feed(const uint8_t *data, uint16_t len)
+{
+    if (!data || len == 0)
+        return -1;
+    if (s_transport != OTA_TRANSPORT_BLE)
+        return -2;
+
+    for (uint16_t i = 0; i < len; i++)
+        parser_feed(data[i]);
+
+    return 0;
 }
 
 static void write_active_persist(int slot_is_b)

@@ -33,12 +33,11 @@
 /* 复位低电平：用固定周期下 CCR=0 的 PWM 凑够 >80us，避免每帧关 PWM/切 GPIO 造成毛刺闪烁 */
 #define SK6812_RESET_UIVES   72U
 
-/*
- * 亮度是「HSV 明度 V × 呼吸 br」两段相乘；仅调 br 时 V=255 仍很亮。
- * HSV_V：颜色本身的最大分量上限；BREATH_PEAK：呼吸到顶时的 br（再乘到 RGB 上）。
- */
-#define SK6812_HSV_V         100U
-#define SK6812_BREATH_PEAK   36U
+/* Peak RGB level is intentionally low to avoid glare. */
+#define SK6812_MAX_LEVEL       4U
+#define SK6812_OTA_FLASH_DIM   0U
+#define SK6812_OTA_FLASH_TICKS 4U
+#define SK6812_OTA_FLASH_HOLD_MS 60U
 
 /* 与 drv_pwm_set 中 GPTIM2 分支一致：GPT_clock/1e6 = 24 */
 #define SK6812_GPT_MHZ       24U
@@ -47,6 +46,8 @@ static struct rt_device_pwm *sk6812_pwm;
 static uint32_t sk6812_ccr0;
 static uint32_t sk6812_ccr1;
 static uint8_t sk6812_pwm_armed;
+static volatile uint8_t g_led_ble_connected;
+static volatile rt_tick_t g_led_ota_flash_until_tick;
 
 static void sk6812_pwm_compute_ccr(void)
 {
@@ -159,9 +160,9 @@ static void sk6812_hsv_to_rgb_u8(uint16_t h_deg, uint8_t s, uint8_t v, uint8_t *
 
 static void sk6812_led_entry(void *param)
 {
-    uint16_t hue = 0;
     int breath_i = 0;
     int breath_dir = 1;
+    uint32_t flash_tick = 0;
 
     (void)param;
 
@@ -176,11 +177,14 @@ static void sk6812_led_entry(void *param)
 
     while (1)
     {
-        uint8_t r, g, b;
-        uint32_t bf;
+        uint32_t breath_level;
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+        uint8_t ota_flash_on;
+        rt_tick_t now = rt_tick_get();
 
-        /* Quadratic ease 0..100; scale in one 32-bit step so low PEAK stays smooth
-         * (uint8_t br had only ~PEAK+1 levels and looked stepped). */
+        /* Use a smooth quadratic breath and switch color by BLE link state. */
         breath_i += breath_dir;
         if (breath_i >= 100)
         {
@@ -191,14 +195,39 @@ static void sk6812_led_entry(void *param)
         {
             breath_i = 0;
             breath_dir = 1;
-            hue = (uint16_t)((hue + 15U) % 360U);
         }
-        bf = (uint32_t)breath_i * breath_i * SK6812_BREATH_PEAK;
+        breath_level = ((uint32_t)breath_i * (uint32_t)breath_i * SK6812_MAX_LEVEL + 5000U) / 10000U;
+        ota_flash_on = 1;
+        if (uart_ota_ble_mode_active() &&
+            g_led_ota_flash_until_tick != 0 &&
+            (rt_int32_t)(g_led_ota_flash_until_tick - now) > 0)
+        {
+            ota_flash_on = (uint8_t)((flash_tick / SK6812_OTA_FLASH_TICKS) & 0x1U);
+            flash_tick++;
+        }
 
-        sk6812_hsv_to_rgb_u8(hue, 255, SK6812_HSV_V, &r, &g, &b);
-        r = (uint8_t)((uint32_t)r * bf / (255U * 10000U));
-        g = (uint8_t)((uint32_t)g * bf / (255U * 10000U));
-        b = (uint8_t)((uint32_t)b * bf / (255U * 10000U));
+        if (g_led_ble_connected)
+        {
+            r = 0;
+            g = (uint8_t)breath_level;
+            b = 0;
+        }
+        else
+        {
+            r = (uint8_t)breath_level;
+            g = 0;
+            b = 0;
+        }
+
+        if (!ota_flash_on)
+        {
+            if (r > SK6812_OTA_FLASH_DIM)
+                r = SK6812_OTA_FLASH_DIM;
+            if (g > SK6812_OTA_FLASH_DIM)
+                g = SK6812_OTA_FLASH_DIM;
+            if (b > SK6812_OTA_FLASH_DIM)
+                b = SK6812_OTA_FLASH_DIM;
+        }
 
         sk6812_show_grb(g, r, b);
         /* ~100 steps × 15 ms ≈ 1.5 s half-cycle (was 3× step + 45 ms, similar period) */
@@ -242,6 +271,9 @@ enum app_att_list
 }
 
 #define SERIAL_UUID_16(x) {((uint8_t)(x & 0xff)), ((uint8_t)(x >> 8))}
+#define BLE_OTA_SOF0 0x55
+#define BLE_OTA_SOF1 0xAA
+#define BLE_OTA_CONN_INTERVAL 24U /* 24 * 1.25ms = 30ms */
 
 typedef struct
 {
@@ -253,10 +285,144 @@ typedef struct
     uint32_t    app_data;
     uint8_t     cccd_on;
     rt_mailbox_t mb_handle;
+    rt_mq_t     ota_mq;
 } app_ble_env_t;
 
 static app_ble_env_t g_ble_env;
 static uint8_t g_svc_uuid[ATT_UUID_128_LEN] = APP_SVC_UUID;
+
+typedef struct
+{
+    uint16_t len;
+    uint8_t  data[512];
+} ble_ota_pkt_t;
+
+#define BLE_OTA_QUEUE_DEPTH 8
+
+static void app_ble_ota_reset(void)
+{
+    g_led_ota_flash_until_tick = 0;
+    if (g_ble_env.ota_mq)
+        rt_mq_control(g_ble_env.ota_mq, RT_IPC_CMD_RESET, RT_NULL);
+    uart_ota_ble_mode_exit();
+}
+
+static void app_ble_request_conn_interval(uint16_t interval)
+{
+    if (!g_ble_env.is_power_on || g_ble_env.conn_idx == 0xFF)
+        return;
+
+    ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(g_ble_env.conn_idx,
+                                                              interval,
+                                                              interval,
+                                                              0,
+                                                              500));
+}
+
+static int app_ble_notify(const uint8_t *data, uint16_t len)
+{
+    sibles_value_t value;
+    int ret;
+
+    if (!g_ble_env.srv_handle || g_ble_env.conn_idx == 0xFF || !g_ble_env.cccd_on)
+        return -1;
+
+    value.hdl = g_ble_env.srv_handle;
+    value.idx = APP_ATT_CHAR_VALUE;
+    value.len = len;
+    value.value = (uint8_t *)data;
+
+    ret = sibles_write_value(g_ble_env.conn_idx, &value);
+    if (ret <= 0)
+    {
+        for (int retry = 0; retry < 5 && ret <= 0; retry++)
+        {
+            rt_thread_mdelay(20);
+            if (g_ble_env.conn_idx == 0xFF || !g_ble_env.cccd_on)
+                return -1;
+            ret = sibles_write_value(g_ble_env.conn_idx, &value);
+        }
+    }
+
+    return ret;
+}
+
+static void app_ble_ota_worker_entry(void *parameter)
+{
+    ble_ota_pkt_t pkt;
+
+    (void)parameter;
+    while (1)
+    {
+        if (!g_ble_env.ota_mq)
+        {
+            rt_thread_mdelay(100);
+            continue;
+        }
+
+        if (rt_mq_recv(g_ble_env.ota_mq, &pkt, sizeof(pkt), RT_WAITING_FOREVER) != RT_EOK)
+            continue;
+
+        if (!uart_ota_ble_mode_active())
+        {
+            if (uart_ota_ble_mode_enter(app_ble_notify) != 0)
+            {
+                LOG_W("BLE OTA worker: enter failed");
+                continue;
+            }
+            uart_ota_ble_set_mtu(g_ble_env.mtu);
+            app_ble_request_conn_interval(BLE_OTA_CONN_INTERVAL);
+            LOG_I("BLE OTA worker started session (mtu=%u)", g_ble_env.mtu);
+        }
+
+        if (uart_ota_ble_feed(pkt.data, pkt.len) != 0)
+            LOG_W("BLE OTA worker: feed failed (len=%u)", pkt.len);
+    }
+}
+
+static int app_ble_ota_start_worker(void)
+{
+    rt_thread_t tid;
+
+    if (g_ble_env.ota_mq)
+        return 0;
+
+    g_ble_env.ota_mq = rt_mq_create("ble_ota",
+                                    sizeof(ble_ota_pkt_t),
+                                    BLE_OTA_QUEUE_DEPTH,
+                                    RT_IPC_FLAG_FIFO);
+    if (!g_ble_env.ota_mq)
+        return -1;
+
+    tid = rt_thread_create("ble_ota",
+                           app_ble_ota_worker_entry,
+                           RT_NULL,
+                           2048,
+                           RT_THREAD_PRIORITY_MAX - 4,
+                           10);
+    if (!tid)
+        return -2;
+
+    rt_thread_startup(tid);
+    return 0;
+}
+
+static int app_ble_ota_enqueue(const uint8_t *data, uint16_t len)
+{
+    ble_ota_pkt_t pkt;
+
+    if (!g_ble_env.ota_mq || !data || len == 0 || len > sizeof(pkt.data))
+        return -1;
+
+    pkt.len = len;
+    memcpy(pkt.data, data, len);
+    if (uart_ota_ble_mode_active())
+    {
+        g_led_ota_flash_until_tick = rt_tick_get() +
+            rt_tick_from_millisecond(SK6812_OTA_FLASH_HOLD_MS);
+    }
+    return rt_mq_send(g_ble_env.ota_mq, &pkt, sizeof(pkt));
+}
 
 /* GATT service attribute database */
 BLE_GATT_SERVICE_DEFINE_128(app_att_db)
@@ -369,6 +535,16 @@ static uint8_t app_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
     if (para->idx == APP_ATT_CHAR_VALUE)
     {
         LOG_HEX("BLE_RX", 16, para->value, para->len);
+        if (((para->len >= 2) &&
+             (para->value[0] == BLE_OTA_SOF0) &&
+             (para->value[1] == BLE_OTA_SOF1)) ||
+            uart_ota_ble_mode_active())
+        {
+            if (app_ble_ota_enqueue(para->value, para->len) != RT_EOK)
+                LOG_W("BLE OTA enqueue failed (len=%u)", para->len);
+            return 0;
+        }
+
         if (para->len <= 4)
             memcpy(&g_ble_env.app_data, para->value, para->len);
         LOG_I("BLE RX value: 0x%08x (len=%d)", g_ble_env.app_data, para->len);
@@ -411,8 +587,10 @@ static int app_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
     {
         ble_gap_connect_ind_t *ind = (ble_gap_connect_ind_t *)data;
         g_ble_env.conn_idx = ind->conn_idx;
+        g_led_ble_connected = 1;
         g_ble_env.peer_addr = ind->peer_addr;
         g_ble_env.mtu = 23;
+        g_ble_env.cccd_on = 0;
         LOG_I("BLE connected! peer=%02x:%02x:%02x:%02x:%02x:%02x",
               ind->peer_addr.addr[5], ind->peer_addr.addr[4],
               ind->peer_addr.addr[3], ind->peer_addr.addr[2],
@@ -431,6 +609,7 @@ static int app_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
     {
         sibles_mtu_exchange_ind_t *ind = (sibles_mtu_exchange_ind_t *)data;
         g_ble_env.mtu = ind->mtu;
+        uart_ota_ble_set_mtu(ind->mtu);
         LOG_I("MTU exchanged: %d", ind->mtu);
         break;
     }
@@ -438,6 +617,14 @@ static int app_ble_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
     case BLE_GAP_DISCONNECTED_IND:
     {
         ble_gap_disconnected_ind_t *ind = (ble_gap_disconnected_ind_t *)data;
+        if (uart_ota_ble_mode_active())
+        {
+            app_ble_ota_reset();
+            LOG_I("BLE OTA session closed on disconnect");
+        }
+        g_ble_env.conn_idx = 0xFF;
+        g_led_ble_connected = 0;
+        g_ble_env.cccd_on = 0;
         LOG_I("BLE disconnected (reason=%d)", ind->reason);
         break;
     }
@@ -506,6 +693,8 @@ static int cmd_ble(int argc, char *argv[])
         rt_kprintf("  ble status     - Show BLE status\n");
         rt_kprintf("  ble adv_start  - Start advertising\n");
         rt_kprintf("  ble adv_stop   - Stop advertising\n");
+        rt_kprintf("  ble ota_status - Show BLE OTA parser status\n");
+        rt_kprintf("  ble ota_exit   - Force-exit BLE OTA parser\n");
         return 0;
     }
 
@@ -524,6 +713,16 @@ static int cmd_ble(int argc, char *argv[])
     {
         sibles_advertising_stop(g_adv_context);
         rt_kprintf("Advertising stopped\n");
+    }
+    else if (strcmp(argv[1], "ota_status") == 0)
+    {
+        rt_kprintf("BLE OTA: %s\n", uart_ota_ble_mode_active() ? "ACTIVE" : "IDLE");
+        rt_kprintf("MTU: %u, CCCD: %s\n", g_ble_env.mtu, g_ble_env.cccd_on ? "ON" : "OFF");
+    }
+    else if (strcmp(argv[1], "ota_exit") == 0)
+    {
+        app_ble_ota_reset();
+        rt_kprintf("BLE OTA parser stopped\n");
     }
 
     return 0;
@@ -554,7 +753,10 @@ int main(void)
 #ifdef BSP_BLE_SIBLES
     /* 2. Initialize BLE stack and start advertising */
     g_ble_env.mb_handle = rt_mb_create("ble_mb", 8, RT_IPC_FLAG_FIFO);
+    g_ble_env.conn_idx = 0xFF;
     g_ble_env.mtu = 23;
+    if (app_ble_ota_start_worker() != 0)
+        rt_kprintf("[WARN] BLE OTA worker start failed.\n");
 
     sifli_ble_enable();
     rt_kprintf("[..] BLE stack initializing...\n");

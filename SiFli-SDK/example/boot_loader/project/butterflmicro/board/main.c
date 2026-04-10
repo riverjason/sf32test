@@ -212,8 +212,25 @@ static int secboot_verify_pubkey_sw(uint8_t *pubkey, uint32_t key_size)
     return 0;
 }
 
+static int secboot_is_enabled(void)
+{
+    uint8_t pattern = 0;
+    int r = sifli_hw_efuse_read(EFUSE_ID_SECURE_ENABLED, &pattern, DFU_SECURE_SIZE);
+
+    if (r != DFU_SECURE_SIZE)
+        return 0;
+
+    return (pattern != 0);
+}
+
 static int secboot_verify_before_run(uint32_t dest, struct image_header_enc *img_hdr)
 {
+    if (!secboot_is_enabled())
+    {
+        boot_uart_tx(hwp_usart1, (uint8_t *)"SFBLsec off\r\n", 13);
+        return 0;
+    }
+
     if (secboot_verify_pubkey_sw(sec_config_cache.sig_pub_key, DFU_SIG_KEY_SIZE))
     {
         boot_uart_tx(hwp_usart1, (uint8_t *)"SFBLpubkey fail\r\n", 17);

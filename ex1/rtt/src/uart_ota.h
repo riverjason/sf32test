@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <rtdef.h>
 
+typedef int (*uart_ota_ble_tx_cb_t)(const uint8_t *data, uint16_t len);
+
 #define UART_OTA_SLOT_A_BASE    0x12020000UL
 #define UART_OTA_SLOT_B_BASE    0x12420000UL
 #define UART_OTA_SLOT_SIZE      0x003C0000UL /* 3.75 MiB per bank, keep ab_persist outside A/B erase range */
@@ -73,5 +75,12 @@ void uart_ota_init(void);
 int uart_ota_mode_enter(void);
 void uart_ota_mode_exit(void);
 rt_bool_t uart_ota_mode_active(void);
+
+/* BLE OTA: reuse the same protocol/state machine over a BLE write/notify characteristic. */
+int uart_ota_ble_mode_enter(uart_ota_ble_tx_cb_t tx_cb);
+void uart_ota_ble_mode_exit(void);
+rt_bool_t uart_ota_ble_mode_active(void);
+void uart_ota_ble_set_mtu(uint16_t mtu);
+int uart_ota_ble_feed(const uint8_t *data, uint16_t len);
 
 #endif
